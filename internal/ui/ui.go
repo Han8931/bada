@@ -3,6 +3,7 @@ package ui
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ const (
 	modeList mode = iota
 	modeAdd
 	modeMetadata
+	modeRename
 )
 
 type metaState struct {
@@ -42,9 +44,12 @@ type Model struct {
 	input      textinput.Model
 	status     string
 	filterDone string
+	sortMode   string
+	sortBuf    string
 	confirmDel bool
 	pendingDel *storage.Task
 	meta       *metaState
+	renameID   int
 }
 
 func Run(store *storage.Store, cfg config.Config) error {
@@ -67,7 +72,9 @@ func Run(store *storage.Store, cfg config.Config) error {
 		input:      ti,
 		mode:       modeList,
 		filterDone: strings.ToLower(cfg.DefaultFilter),
+		sortMode:   "created",
 	}
+	m.sortTasks()
 
 	program := tea.NewProgram(m)
 	_, err = program.Run()
@@ -84,6 +91,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
 		}
+		if m.mode == modeRename {
+			return m.updateRenameMode(msg.String(), msg)
+		}
 		if m.confirmDel {
 			return m.updateDeleteConfirm(msg.String())
 		}
@@ -98,6 +108,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if m.mode == modeAdd {
 		return m.updateAddMode(key, msg)
+	}
+	if m.mode == modeRename {
+		return m.updateRenameMode(key, msg)
+	}
+	if m.processSortKey(key) {
+		return m, nil
 	}
 	return m.updateListMode(key)
 }
@@ -125,7 +141,8 @@ func (m Model) updateAddMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("reload failed: %v", err)
 		} else {
 			m.status = "Added task"
-			m.cursor = clampCursor(len(m.tasks)-1, len(m.tasks))
+			m.sortTasks()
+			m.cursor = clampCursor(m.findTaskIndex(m.lastTaskID()), len(m.tasks))
 		}
 		m.input.SetValue("")
 		m.input.Blur()
@@ -189,6 +206,46 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.confirmDel = true
 		m.pendingDel = &t
 		m.status = fmt.Sprintf("Delete \"%s\"? y/n", t.Title)
+	case m.cfg.Keys.Rename:
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.startRename(m.tasks[m.cursor])
+	case "r":
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.startRename(m.tasks[m.cursor])
+	case m.cfg.Keys.PriorityUp, "+":
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.bumpPriority(1)
+	case m.cfg.Keys.PriorityDown, "-":
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.bumpPriority(-1)
+	case m.cfg.Keys.DueForward:
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.shiftDue(1)
+	case m.cfg.Keys.DueBack:
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.shiftDue(-1)
+	case "[":
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.shiftDue(-1)
+	case "]":
+		if len(m.tasks) == 0 {
+			return m, nil
+		}
+		return m.shiftDue(1)
 	case m.cfg.Keys.Detail:
 		if len(m.tasks) == 0 {
 			m.status = "No tasks"
@@ -247,6 +304,12 @@ func (m Model) View() string {
 		b.WriteString("Field: " + m.currentMetaLabel())
 		b.WriteString("\n")
 		b.WriteString(m.input.View())
+	} else if m.mode == modeRename {
+		b.WriteString("Rename task: Enter to save, Esc to cancel")
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("Current: %s\n", m.currentTaskTitle()))
+		b.WriteString("New: ")
+		b.WriteString(m.input.View())
 	} else {
 		b.WriteString(m.renderMetadataPanel())
 	}
@@ -281,6 +344,7 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 		var err error
 		m.tasks, err = m.store.FetchTasks()
 		if err == nil {
+			m.sortTasks()
 			m.cursor = clampCursor(m.cursor, len(m.tasks))
 			m.status = "Deleted task"
 		} else {
@@ -295,8 +359,8 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 }
 
 func renderHelp(k config.Keymap) string {
-	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s quit",
-		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Quit)
+	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s quit",
+		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Quit)
 }
 
 func (m Model) renderTaskList() string {
@@ -420,6 +484,7 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 
 	m.tasks, err = m.store.FetchTasks()
 	if err == nil {
+		m.sortTasks()
 		for i, t := range m.tasks {
 			if t.ID == taskID {
 				m.cursor = clampCursor(i, len(m.tasks))
@@ -490,7 +555,17 @@ func parsePriority(v string) (int, error) {
 	if v == "" {
 		return 0, nil
 	}
-	return strconv.Atoi(v)
+	val, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 {
+		val = 0
+	}
+	if val > 10 {
+		val = 10
+	}
+	return val, nil
 }
 
 func parseDate(v string) (sql.NullTime, error) {
@@ -595,6 +670,155 @@ func emptyPlaceholder(v string) string {
 	return v
 }
 
+func (m Model) startRename(t storage.Task) (tea.Model, tea.Cmd) {
+	m.renameID = t.ID
+	m.input.SetValue(t.Title)
+	m.input.Placeholder = "Rename task"
+	m.input.Focus()
+	m.mode = modeRename
+	m.status = "Rename: Enter to save, Esc to cancel"
+	return m, nil
+}
+
+func (m Model) updateRenameMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case m.cfg.Keys.Cancel, "esc":
+		m.mode = modeList
+		m.renameID = 0
+		m.input.Blur()
+		m.status = "Rename cancelled"
+		return m, nil
+	case m.cfg.Keys.Confirm, "enter":
+		title := strings.TrimSpace(m.input.Value())
+		if title == "" {
+			m.status = "Title cannot be empty"
+			return m, nil
+		}
+		if err := m.store.UpdateTitle(m.renameID, title); err != nil {
+			m.status = fmt.Sprintf("rename failed: %v", err)
+			return m, nil
+		}
+		var err error
+		m.tasks, err = m.store.FetchTasks()
+		if err == nil {
+			m.sortTasks()
+			m.cursor = clampCursor(m.findTaskIndex(m.renameID), len(m.tasks))
+			m.status = "Renamed task"
+		} else {
+			m.status = fmt.Sprintf("reload failed: %v", err)
+		}
+		m.renameID = 0
+		m.mode = modeList
+		m.input.Blur()
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m Model) findTaskIndex(id int) int {
+	for i, t := range m.tasks {
+		if t.ID == id {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
+	t := m.tasks[m.cursor]
+	newPrio := t.Priority + delta
+	if newPrio < 0 {
+		newPrio = 0
+	}
+	if newPrio > 10 {
+		newPrio = 10
+	}
+	if err := m.store.UpdatePriority(t.ID, newPrio); err != nil {
+		m.status = fmt.Sprintf("priority failed: %v", err)
+		return m, nil
+	}
+	var err error
+	m.tasks, err = m.store.FetchTasks()
+	if err == nil {
+		m.sortTasks()
+		m.cursor = clampCursor(m.findTaskIndex(t.ID), len(m.tasks))
+		m.status = fmt.Sprintf("Priority set to %d", newPrio)
+	} else {
+		m.status = fmt.Sprintf("reload failed: %v", err)
+	}
+	return m, nil
+}
+
+func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
+	t := m.tasks[m.cursor]
+	if err := m.store.ShiftDue(t.ID, days); err != nil {
+		m.status = fmt.Sprintf("shift due failed: %v", err)
+		return m, nil
+	}
+	var err error
+	m.tasks, err = m.store.FetchTasks()
+	if err == nil {
+		m.sortTasks()
+		m.cursor = clampCursor(m.findTaskIndex(t.ID), len(m.tasks))
+		m.status = fmt.Sprintf("Due shifted by %+dd", days)
+	} else {
+		m.status = fmt.Sprintf("reload failed: %v", err)
+	}
+	return m, nil
+}
+
+func (m Model) lastTaskID() int {
+	if len(m.tasks) == 0 {
+		return 0
+	}
+	return m.tasks[len(m.tasks)-1].ID
+}
+
+func (m *Model) sortTasks() {
+	switch m.sortMode {
+	case "due":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			di, dj := m.tasks[i].Due, m.tasks[j].Due
+			if di.Valid && dj.Valid {
+				return di.Time.Before(dj.Time)
+			}
+			if di.Valid {
+				return true
+			}
+			if dj.Valid {
+				return false
+			}
+			return m.tasks[i].ID < m.tasks[j].ID
+		})
+	case "priority":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			if m.tasks[i].Priority == m.tasks[j].Priority {
+				return m.tasks[i].ID < m.tasks[j].ID
+			}
+			return m.tasks[i].Priority > m.tasks[j].Priority
+		})
+	case "created":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			return m.tasks[i].CreatedAt.Before(m.tasks[j].CreatedAt)
+		})
+	default:
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			return m.tasks[i].ID < m.tasks[j].ID
+		})
+	}
+}
+
+func (m Model) currentTaskTitle() string {
+	if len(m.tasks) == 0 {
+		return ""
+	}
+	t := m.tasks[clampCursor(m.cursor, len(m.tasks))]
+	return t.Title
+}
+
 func clampCursor(cur, n int) int {
 	if n <= 0 {
 		return 0
@@ -606,6 +830,41 @@ func clampCursor(cur, n int) int {
 		return n - 1
 	}
 	return cur
+}
+
+func (m *Model) processSortKey(key string) bool {
+	// simple 2-key sequence: s + d/p/t (due/priority/created-time)
+	if key == "" {
+		return false
+	}
+	if key == "s" {
+		m.sortBuf = "s"
+		m.status = "Sort: press d (due), p (priority), t (created)"
+		return true
+	}
+	if m.sortBuf == "s" {
+		switch key {
+		case "d":
+			m.sortMode = "due"
+			m.sortTasks()
+			m.status = "Sorted by due date"
+		case "p":
+			m.sortMode = "priority"
+			m.sortTasks()
+			m.status = "Sorted by priority"
+		case "t":
+			m.sortMode = "created"
+			m.sortTasks()
+			m.status = "Sorted by created time"
+		default:
+			m.status = "Sort cancelled"
+		}
+		m.sortBuf = ""
+		return true
+	}
+	// reset buffer on other keys
+	m.sortBuf = ""
+	return false
 }
 
 func humanDone(done bool) string {

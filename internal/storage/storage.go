@@ -172,6 +172,43 @@ func (s *Store) DeleteTask(id int) error {
 	return err
 }
 
+func (s *Store) UpdateTitle(id int, title string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET title = ? WHERE id = ?;`, title, id)
+	return err
+}
+
+func (s *Store) UpdatePriority(id int, priority int) error {
+	if priority < 0 {
+		priority = 0
+	}
+	if priority > 5 {
+		priority = 5 
+	}
+	_, err := s.db.Exec(`UPDATE tasks SET priority = ? WHERE id = ?;`, priority, id)
+	return err
+}
+
+func (s *Store) ShiftDue(id int, days int) error {
+	var current sql.NullString
+	err := s.db.QueryRow(`SELECT due FROM tasks WHERE id = ?;`, id).Scan(&current)
+	if err != nil {
+		return err
+	}
+	var base time.Time
+	if current.Valid {
+		base, err = time.Parse(time.RFC3339, current.String)
+		if err != nil {
+			base = time.Now().UTC()
+		}
+	} else {
+		base = time.Now().UTC()
+	}
+	newTime := base.AddDate(0, 0, days)
+	newStr := sql.NullString{String: newTime.UTC().Format(time.RFC3339), Valid: true}
+	_, err = s.db.Exec(`UPDATE tasks SET due = ? WHERE id = ?;`, newStr, id)
+	return err
+}
+
 func (s *Store) UpdateTaskMetadata(id int, project, tags string, priority int, due, start sql.NullTime, recurring bool) error {
 	dueStr := sql.NullString{}
 	if due.Valid {
