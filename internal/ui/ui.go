@@ -22,6 +22,7 @@ const (
 	modeAdd
 	modeMetadata
 	modeRename
+	modeCommand
 )
 
 type metaState struct {
@@ -62,6 +63,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 	ti.Placeholder = "Task title"
 	ti.CharLimit = 256
 	ti.Width = 40
+	ti.Prompt = ""
 
 	m := Model{
 		store:      store,
@@ -94,6 +96,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeRename {
 			return m.updateRenameMode(msg.String(), msg)
 		}
+		if m.mode == modeCommand {
+			return m.updateCommandMode(msg.String(), msg)
+		}
 		if m.confirmDel {
 			return m.updateDeleteConfirm(msg.String())
 		}
@@ -111,6 +116,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeRename {
 		return m.updateRenameMode(key, msg)
+	}
+	if m.mode == modeCommand {
+		return m.updateCommandMode(key, msg)
 	}
 	if m.processSortKey(key) {
 		return m, nil
@@ -159,6 +167,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "ctrl+c", m.cfg.Keys.Quit:
 		return m, tea.Quit
+	case ":":
+		return m.startCommand()
 	case m.cfg.Keys.Down:
 		if len(m.tasks) == 0 {
 			return m, nil
@@ -310,12 +320,15 @@ func (m Model) View() string {
 		b.WriteString(fmt.Sprintf("Current: %s\n", m.currentTaskTitle()))
 		b.WriteString("New: ")
 		b.WriteString(m.input.View())
+	} else if m.mode == modeCommand {
+		b.WriteString(":")
+		b.WriteString(m.input.View())
 	} else {
 		b.WriteString(m.renderMetadataPanel())
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(m.status)
+	b.WriteString(m.renderStatusBar())
 	b.WriteString("\n")
 	b.WriteString(renderHelp(m.cfg.Keys))
 
@@ -324,7 +337,7 @@ func (m Model) View() string {
 
 func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 	switch key {
-	case "n", "N":
+	case "n", "N", "esc":
 		m.status = "Delete cancelled"
 		m.confirmDel = false
 		m.pendingDel = nil
@@ -562,8 +575,8 @@ func parsePriority(v string) (int, error) {
 	if val < 0 {
 		val = 0
 	}
-	if val > 10 {
-		val = 10
+	if val > 5 {
+		val = 5
 	}
 	return val, nil
 }
@@ -670,6 +683,68 @@ func emptyPlaceholder(v string) string {
 	return v
 }
 
+func (m Model) renderStatusBar() string {
+	modeLabel := m.modeLabel()
+	total := len(m.tasks)
+	cursor := 0
+	if total > 0 {
+		cursor = m.cursor + 1
+	}
+	return fmt.Sprintf("[%s] sort:%s  %d/%d  %s", modeLabel, m.sortMode, cursor, total, m.status)
+}
+
+func (m Model) modeLabel() string {
+	switch m.mode {
+	case modeList:
+		return "LIST"
+	case modeAdd:
+		return "ADD"
+	case modeMetadata:
+		return "META"
+	case modeRename:
+		return "RENAME"
+	case modeCommand:
+		return "COMMAND"
+	default:
+		return "?"
+	}
+}
+
+func (m Model) startCommand() (tea.Model, tea.Cmd) {
+	m.mode = modeCommand
+	m.input.SetValue("")
+	m.input.Placeholder = ""
+	m.input.Focus()
+	m.status = "Command: type 'help' and Enter, Esc to cancel"
+	return m, nil
+}
+
+func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc":
+		m.mode = modeList
+		m.input.Blur()
+		m.status = "Command cancelled"
+		return m, nil
+	case m.cfg.Keys.Confirm, "enter":
+		cmd := strings.TrimSpace(m.input.Value())
+		cmdLower := strings.ToLower(cmd)
+		switch cmdLower {
+		case "help":
+			m.status = "Commands: help | sort (s then d/p/t) | rename (r) | priority +/- | due ]/["
+		default:
+			m.status = fmt.Sprintf("unknown command: %s", cmd)
+		}
+		m.mode = modeList
+		m.input.Blur()
+		return m, nil
+	default:
+		var c tea.Cmd
+		m.input, c = m.input.Update(msg)
+		return m, c
+	}
+}
+
 func (m Model) startRename(t storage.Task) (tea.Model, tea.Cmd) {
 	m.renameID = t.ID
 	m.input.SetValue(t.Title)
@@ -733,8 +808,8 @@ func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
 	if newPrio < 0 {
 		newPrio = 0
 	}
-	if newPrio > 10 {
-		newPrio = 10
+	if newPrio > 5 {
+		newPrio = 5
 	}
 	if err := m.store.UpdatePriority(t.ID, newPrio); err != nil {
 		m.status = fmt.Sprintf("priority failed: %v", err)

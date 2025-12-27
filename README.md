@@ -11,13 +11,18 @@
 **bada** is a Vim-first TUI todo app for capturing what matters, organizing it into projects/tags, and finishing with calm focus.
 
 
+## Daily Use
+
+- Rename: r (shows current/new), Enter saves, Esc cancels.
+- Priority: + / - (max 10).
+- Due shift: ] / [ (+1d/-1d).
+- Sort: s then d/p/t.
+
 
 ## Todo
 
 Here are some focused feature ideas to grow the app:
 - Filtering & search: quick filters (all/active/done), project/tag filters, text search on title/tags.
-- Sorting: by due date, priority, created time; optionally pin tasks.
-- Quick edits in list: inline rename (r), change priority (+/-), shift due date (+1d/-1d).
 - Recurring templates: set recurrence rules (daily/weekly/weekday-only) with auto-generation when completed.
 - Reminders: flag overdue/soon-due tasks, optional notification hook (stdout or simple command hook).
 - Bulk actions: multi-select (mark done/delete/move project) using visual selection.

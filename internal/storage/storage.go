@@ -182,7 +182,7 @@ func (s *Store) UpdatePriority(id int, priority int) error {
 		priority = 0
 	}
 	if priority > 5 {
-		priority = 5 
+		priority = 5
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET priority = ? WHERE id = ?;`, priority, id)
 	return err
