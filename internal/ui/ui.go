@@ -38,20 +38,21 @@ type metaState struct {
 }
 
 type Model struct {
-	store      *storage.Store
-	cfg        config.Config
-	tasks      []storage.Task
-	cursor     int
-	mode       mode
-	input      textinput.Model
-	status     string
-	filterDone string
-	sortMode   string
-	sortBuf    string
-	confirmDel bool
-	pendingDel *storage.Task
-	meta       *metaState
-	renameID   int
+	store        *storage.Store
+	cfg          config.Config
+	tasks        []storage.Task
+	cursor       int
+	mode         mode
+	input        textinput.Model
+	status       string
+	filterDone   string
+	sortMode     string
+	sortBuf      string
+	currentTopic string
+	confirmDel   bool
+	pendingDel   *storage.Task
+	meta         *metaState
+	renameID     int
 }
 
 func Run(store *storage.Store, cfg config.Config) error {
@@ -67,15 +68,16 @@ func Run(store *storage.Store, cfg config.Config) error {
 	ti.Prompt = ""
 
 	m := Model{
-		store:      store,
-		cfg:        cfg,
-		tasks:      tasks,
-		cursor:     clampCursor(0, len(tasks)),
-		status:     "",
-		input:      ti,
-		mode:       modeList,
-		filterDone: strings.ToLower(cfg.DefaultFilter),
-		sortMode:   "created",
+		store:        store,
+		cfg:          cfg,
+		tasks:        tasks,
+		cursor:       clampCursor(0, len(tasks)),
+		status:       "",
+		input:        ti,
+		mode:         modeList,
+		filterDone:   strings.ToLower(cfg.DefaultFilter),
+		sortMode:     "created",
+		currentTopic: "",
 	}
 	m.sortTasks()
 
@@ -165,38 +167,36 @@ func (m Model) updateAddMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
+	vis := m.visibleItems()
 	switch key {
 	case "ctrl+c", m.cfg.Keys.Quit:
 		return m, tea.Quit
 	case ":":
 		return m.startCommand()
-	case m.cfg.Keys.Down:
-		if len(m.tasks) == 0 {
+	case "h", "left":
+		if m.currentTopic != "" {
+			m.currentTopic = ""
+			m.cursor = clampCursor(0, len(m.visibleItems()))
+			m.status = "Back to root"
+		}
+	case m.cfg.Keys.Down, "down":
+		if len(vis) == 0 {
 			return m, nil
 		}
-		m.cursor = clampCursor(m.cursor+1, len(m.tasks))
-	case "down":
-		if len(m.tasks) == 0 {
-			return m, nil
-		}
-		m.cursor = clampCursor(m.cursor+1, len(m.tasks))
-	case m.cfg.Keys.Up:
+		m.cursor = clampCursor(m.cursor+1, len(vis))
+	case m.cfg.Keys.Up, "up":
 		if m.cursor > 0 {
-			m.cursor = clampCursor(m.cursor-1, len(m.tasks))
-		}
-	case "up":
-		if m.cursor > 0 {
-			m.cursor = clampCursor(m.cursor-1, len(m.tasks))
+			m.cursor = clampCursor(m.cursor-1, len(vis))
 		}
 	case m.cfg.Keys.Add:
 		m.mode = modeAdd
 		m.input.Focus()
 		m.status = "Add mode: type a title and press Enter"
 	case m.cfg.Keys.Toggle:
-		if len(m.tasks) == 0 {
+		task, ok := m.currentTask()
+		if !ok {
 			return m, nil
 		}
-		task := m.tasks[m.cursor]
 		err := m.store.SetDone(task.ID, !task.Done)
 		if err != nil {
 			m.status = fmt.Sprintf("toggle failed: %v", err)
@@ -204,69 +204,56 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		}
 		m.tasks, err = m.store.FetchTasks()
 		if err == nil {
-			m.cursor = clampCursor(m.cursor+1, len(m.tasks))
+			m.sortTasks()
+			m.cursor = clampCursor(m.cursor+1, len(m.visibleItems()))
 			m.status = "Toggled task"
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
 		}
 	case m.cfg.Keys.Delete:
-		if len(m.tasks) == 0 {
+		task, ok := m.currentTask()
+		if !ok {
 			return m, nil
 		}
-		t := m.tasks[m.cursor]
 		m.confirmDel = true
-		m.pendingDel = &t
-		m.status = fmt.Sprintf("Delete \"%s\"? y/n", t.Title)
+		m.pendingDel = &task
+		m.status = fmt.Sprintf("Delete \"%s\"? y/n", task.Title)
 	case m.cfg.Keys.DeleteAllDone:
 		m.confirmDel = true
 		m.pendingDel = nil
 		m.status = "Delete ALL done tasks? y/n"
-	case m.cfg.Keys.Rename:
-		if len(m.tasks) == 0 {
+	case m.cfg.Keys.Rename, "r":
+		task, ok := m.currentTask()
+		if !ok {
 			return m, nil
 		}
-		return m.startRename(m.tasks[m.cursor])
-	case "r":
-		if len(m.tasks) == 0 {
-			return m, nil
-		}
-		return m.startRename(m.tasks[m.cursor])
+		return m.startRename(task)
 	case m.cfg.Keys.PriorityUp, "+":
-		if len(m.tasks) == 0 {
+		if _, ok := m.currentTask(); !ok {
 			return m, nil
 		}
 		return m.bumpPriority(1)
 	case m.cfg.Keys.PriorityDown, "-":
-		if len(m.tasks) == 0 {
+		if _, ok := m.currentTask(); !ok {
 			return m, nil
 		}
 		return m.bumpPriority(-1)
-	case m.cfg.Keys.DueForward:
-		if len(m.tasks) == 0 {
+	case m.cfg.Keys.DueForward, "]":
+		if _, ok := m.currentTask(); !ok {
 			return m, nil
 		}
 		return m.shiftDue(1)
-	case m.cfg.Keys.DueBack:
-		if len(m.tasks) == 0 {
+	case m.cfg.Keys.DueBack, "[":
+		if _, ok := m.currentTask(); !ok {
 			return m, nil
 		}
 		return m.shiftDue(-1)
-	case "[":
-		if len(m.tasks) == 0 {
-			return m, nil
-		}
-		return m.shiftDue(-1)
-	case "]":
-		if len(m.tasks) == 0 {
-			return m, nil
-		}
-		return m.shiftDue(1)
 	case m.cfg.Keys.Detail:
-		if len(m.tasks) == 0 {
-			m.status = "No tasks"
+		task, ok := m.currentTask()
+		if !ok {
+			m.status = "No task selected"
 			return m, nil
 		}
-		task := m.tasks[m.cursor]
 		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, humanDone(task.Done))
 		if task.Project != "" {
 			info += " • topic:" + task.Project
@@ -288,11 +275,35 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		}
 		m.status = info
 	case m.cfg.Keys.Edit:
-		if len(m.tasks) == 0 {
+		task, ok := m.currentTask()
+		if !ok {
 			m.status = "No tasks to edit"
 			return m, nil
 		}
-		return m.startMetadataEdit(m.tasks[m.cursor])
+		return m.startMetadataEdit(task)
+	case m.cfg.Keys.SortDue:
+		m.sortMode = "due"
+		m.sortTasks()
+		m.status = "Sorted by due date"
+	case m.cfg.Keys.SortPriority:
+		m.sortMode = "priority"
+		m.sortTasks()
+		m.status = "Sorted by priority"
+	case m.cfg.Keys.SortCreated:
+		m.sortMode = "created"
+		m.sortTasks()
+		m.status = "Sorted by created time"
+	case "l", "right", "enter":
+		if m.currentTopic == "" && len(vis) > 0 && m.cursor < len(vis) {
+			it := vis[m.cursor]
+			if it.kind == itemTopic {
+				m.currentTopic = it.topic
+				m.cursor = clampCursor(0, len(m.visibleItems()))
+				m.status = fmt.Sprintf("Topic: %s", m.currentTopic)
+				return m, nil
+			}
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -303,11 +314,7 @@ func (m Model) View() string {
 	b.WriteString("Todo (Bubble Tea + SQLite)")
 	b.WriteString("\n\n")
 
-	if len(m.tasks) == 0 {
-		b.WriteString("No tasks yet.")
-	} else {
-		b.WriteString(m.renderTaskList())
-	}
+	b.WriteString(m.renderTaskList())
 
 	b.WriteString("\n---\n")
 
@@ -398,21 +405,25 @@ func renderHelp(k config.Keymap) string {
 
 func (m Model) renderTaskList() string {
 	var b strings.Builder
-	for i, t := range m.tasks {
+	items := m.visibleItems()
+	for i, it := range items {
 		cursor := " "
 		if m.cursor == i && m.mode == modeList {
 			cursor = ">"
 		}
-
-		checkbox := "[ ]"
-		if t.Done {
-			checkbox = "[x]"
+		switch it.kind {
+		case itemTopic:
+			count := m.topicCounts()[it.topic]
+			b.WriteString(fmt.Sprintf("%s [topic] %s (%d)\n", cursor, it.topic, count))
+		case itemTask:
+			checkbox := "[ ]"
+			if it.task.Done {
+				checkbox = "[x]"
+			}
+			body := fmt.Sprintf("%s %s %s", cursor, checkbox, it.task.Title)
+			b.WriteString(body)
+			b.WriteString("\n")
 		}
-
-		body := fmt.Sprintf("%s %s %s", cursor, checkbox, t.Title)
-
-		b.WriteString(body)
-		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -451,7 +462,7 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 			return mm, cmd
 		}
 		return res, cmd
-	case "tab", "right", "l", "j", "down":
+	case "tab", "right", "down":
 		if m.meta == nil {
 			return m, nil
 		}
@@ -461,7 +472,7 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		m.input.Placeholder = m.meta.currentLabel()
 		m.status = m.metaPrompt()
 		return m, nil
-	case "shift+tab", "left", "h", "k", "up":
+	case "shift+tab", "left", "up":
 		if m.meta == nil {
 			return m, nil
 		}
@@ -487,6 +498,17 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 	default:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		// sanitize input per field type
+		if m.meta != nil {
+			switch m.meta.index {
+			case 3: // priority
+				m.input.SetValue(filterDigits(m.input.Value()))
+			case 4, 5: // dates
+				m.input.SetValue(filterDate(m.input.Value()))
+			case 6: // recurring
+				m.input.SetValue(filterYN(m.input.Value()))
+			}
+		}
 		return m, cmd
 	}
 }
@@ -700,20 +722,20 @@ func wrapIndex(idx, n int) int {
 }
 
 func (m Model) renderMetadataPanel() string {
-	if len(m.tasks) == 0 {
+	task, ok := m.currentTask()
+	if !ok {
 		return "No task selected"
 	}
-	t := m.tasks[clampCursor(m.cursor, len(m.tasks))]
 	var b strings.Builder
 	b.WriteString("Metadata\n")
-	b.WriteString(fmt.Sprintf("Title     : %s\n", t.Title))
-	b.WriteString(fmt.Sprintf("Done      : %s\n", humanDone(t.Done)))
-	b.WriteString(fmt.Sprintf("Topic     : %s\n", emptyPlaceholder(t.Project)))
-	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(t.Tags)))
-	b.WriteString(fmt.Sprintf("Priority  : %d\n", t.Priority))
-	b.WriteString(fmt.Sprintf("Due       : %s\n", formatDate(t.Due)))
-	b.WriteString(fmt.Sprintf("Start     : %s\n", formatDate(t.Start)))
-	b.WriteString(fmt.Sprintf("Recurring : %t\n", t.Recurring))
+	b.WriteString(fmt.Sprintf("Title     : %s\n", task.Title))
+	b.WriteString(fmt.Sprintf("Done      : %s\n", humanDone(task.Done)))
+	b.WriteString(fmt.Sprintf("Topic     : %s\n", emptyPlaceholder(task.Project)))
+	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(task.Tags)))
+	b.WriteString(fmt.Sprintf("Priority  : %d\n", task.Priority))
+	b.WriteString(fmt.Sprintf("Due       : %s\n", formatDate(task.Due)))
+	b.WriteString(fmt.Sprintf("Start     : %s\n", formatDate(task.Start)))
+	b.WriteString(fmt.Sprintf("Recurring : %t\n", task.Recurring))
 	return b.String()
 }
 
@@ -928,10 +950,10 @@ func (m *Model) sortTasks() {
 }
 
 func (m Model) currentTaskTitle() string {
-	if len(m.tasks) == 0 {
+	t, ok := m.currentTask()
+	if !ok {
 		return ""
 	}
-	t := m.tasks[clampCursor(m.cursor, len(m.tasks))]
 	return t.Title
 }
 
@@ -988,4 +1010,119 @@ func humanDone(done bool) string {
 		return "done"
 	}
 	return "pending"
+}
+
+func filterDigits(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func filterDate(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 10 {
+			break
+		}
+	}
+	return b.String()
+}
+
+func filterYN(v string) string {
+	if v == "" {
+		return ""
+	}
+	r := strings.ToLower(strings.TrimSpace(v))
+	if len(r) == 0 {
+		return ""
+	}
+	if r[0] == 'y' || r[0] == 'n' {
+		return string(r[0])
+	}
+	return ""
+}
+
+type itemKind int
+
+const (
+	itemTopic itemKind = iota
+	itemTask
+)
+
+type listItem struct {
+	kind  itemKind
+	topic string
+	task  storage.Task
+}
+
+func (m Model) visibleItems() []listItem {
+	items := make([]listItem, 0)
+	if m.currentTopic == "" {
+		for _, topic := range m.sortedTopics() {
+			items = append(items, listItem{kind: itemTopic, topic: topic})
+		}
+		for _, t := range m.tasks {
+			if strings.TrimSpace(t.Project) == "" {
+				items = append(items, listItem{kind: itemTask, task: t})
+			}
+		}
+	} else {
+		for _, t := range m.tasks {
+			if t.Project == m.currentTopic {
+				items = append(items, listItem{kind: itemTask, task: t})
+			}
+		}
+	}
+	return items
+}
+
+func (m Model) topicCounts() map[string]int {
+	counts := make(map[string]int)
+	for _, t := range m.tasks {
+		topic := strings.TrimSpace(t.Project)
+		if topic == "" {
+			continue
+		}
+		counts[topic]++
+	}
+	return counts
+}
+
+func (m Model) sortedTopics() []string {
+	set := map[string]struct{}{}
+	for _, t := range m.tasks {
+		topic := strings.TrimSpace(t.Project)
+		if topic == "" {
+			continue
+		}
+		set[topic] = struct{}{}
+	}
+	topics := make([]string, 0, len(set))
+	for k := range set {
+		topics = append(topics, k)
+	}
+	sort.Strings(topics)
+	return topics
+}
+
+func (m Model) currentTask() (storage.Task, bool) {
+	items := m.visibleItems()
+	if len(items) == 0 {
+		return storage.Task{}, false
+	}
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return storage.Task{}, false
+	}
+	it := items[m.cursor]
+	if it.kind != itemTask {
+		return storage.Task{}, false
+	}
+	return it.task, true
 }
