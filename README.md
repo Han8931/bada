@@ -21,7 +21,6 @@
 
 ## Todo
 
-Here are some focused feature ideas to grow the app:
 - Filtering & search: quick filters (all/active/done), project/tag filters, text search on title/tags.
 - Recurring templates: set recurrence rules (daily/weekly/weekday-only) with auto-generation when completed.
 - Reminders: flag overdue/soon-due tasks, optional notification hook (stdout or simple command hook).

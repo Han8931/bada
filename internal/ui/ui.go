@@ -27,6 +27,7 @@ const (
 
 type metaState struct {
 	taskID    int
+	title     string
 	project   string
 	tags      string
 	priority  string
@@ -70,7 +71,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 		cfg:        cfg,
 		tasks:      tasks,
 		cursor:     clampCursor(0, len(tasks)),
-		status:     "Press 'a' to add, space to toggle, 'd' to delete.",
+		status:     "",
 		input:      ti,
 		mode:       modeList,
 		filterDone: strings.ToLower(cfg.DefaultFilter),
@@ -299,7 +300,7 @@ func (m Model) View() string {
 	b.WriteString("\n\n")
 
 	if len(m.tasks) == 0 {
-		b.WriteString("No tasks yet. Press 'a' to add one.")
+		b.WriteString("No tasks yet.")
 	} else {
 		b.WriteString(m.renderTaskList())
 	}
@@ -329,9 +330,6 @@ func (m Model) View() string {
 
 	b.WriteString("\n\n")
 	b.WriteString(m.renderStatusBar())
-	b.WriteString("\n")
-	b.WriteString(renderHelp(m.cfg.Keys))
-
 	return b.String()
 }
 
@@ -400,6 +398,7 @@ func (m Model) renderTaskList() string {
 func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
 		taskID:    t.ID,
+		title:     t.Title,
 		project:   t.Project,
 		tags:      t.Tags,
 		priority:  fmt.Sprintf("%d", t.Priority),
@@ -419,11 +418,17 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case m.cfg.Keys.Cancel, "esc":
-		m.meta = nil
-		m.mode = modeList
-		m.input.Blur()
-		m.status = "Edit cancelled"
-		return m, nil
+		if m.meta == nil {
+			return m, nil
+		}
+		// Keep current field value, then save what we have so far.
+		m.meta.setCurrentValue(m.input.Value())
+		res, cmd := m.saveMetadata()
+		if mm, ok := res.(Model); ok {
+			mm.status = "Metadata saved"
+			return mm, cmd
+		}
+		return res, cmd
 	case "tab", "right", "l", "j", "down":
 		if m.meta == nil {
 			return m, nil
@@ -469,6 +474,11 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	taskID := m.meta.taskID
+	title := strings.TrimSpace(m.meta.title)
+	if title == "" {
+		m.status = "title cannot be empty"
+		return m, nil
+	}
 	priority, err := parsePriority(m.meta.priority)
 	if err != nil {
 		m.status = fmt.Sprintf("priority invalid: %v", err)
@@ -489,6 +499,10 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 	err = m.store.UpdateTaskMetadata(m.meta.taskID, m.meta.project, m.meta.tags, priority, due, start, recurring)
 	if err != nil {
 		m.status = fmt.Sprintf("save failed: %v", err)
+		return m, nil
+	}
+	if err := m.store.UpdateTitle(m.meta.taskID, title); err != nil {
+		m.status = fmt.Sprintf("title save failed: %v", err)
 		return m, nil
 	}
 	m.meta = nil
@@ -512,7 +526,7 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 }
 
 func metaFields() []string {
-	return []string{"project", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurring (y/n)"}
+	return []string{"title", "project", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurring (y/n)"}
 }
 
 func (ms metaState) currentLabel() string {
@@ -522,16 +536,18 @@ func (ms metaState) currentLabel() string {
 func (ms metaState) currentValue() string {
 	switch ms.index {
 	case 0:
-		return ms.project
+		return ms.title
 	case 1:
-		return ms.tags
+		return ms.project
 	case 2:
-		return ms.priority
+		return ms.tags
 	case 3:
-		return ms.due
+		return ms.priority
 	case 4:
-		return ms.start
+		return ms.due
 	case 5:
+		return ms.start
+	case 6:
 		return ms.recurring
 	default:
 		return ""
@@ -541,16 +557,18 @@ func (ms metaState) currentValue() string {
 func (ms *metaState) setCurrentValue(v string) {
 	switch ms.index {
 	case 0:
-		ms.project = v
+		ms.title = v
 	case 1:
-		ms.tags = v
+		ms.project = v
 	case 2:
-		ms.priority = v
+		ms.tags = v
 	case 3:
-		ms.due = v
+		ms.priority = v
 	case 4:
-		ms.start = v
+		ms.due = v
 	case 5:
+		ms.start = v
+	case 6:
 		ms.recurring = v
 	}
 }
@@ -625,6 +643,7 @@ func (m Model) renderMetaBox() string {
 	}
 	fields := metaFields()
 	values := []string{
+		m.meta.title,
 		m.meta.project,
 		m.meta.tags,
 		m.meta.priority,
