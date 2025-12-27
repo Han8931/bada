@@ -38,21 +38,23 @@ type metaState struct {
 }
 
 type Model struct {
-	store        *storage.Store
-	cfg          config.Config
-	tasks        []storage.Task
-	cursor       int
-	mode         mode
-	input        textinput.Model
-	status       string
-	filterDone   string
-	sortMode     string
-	sortBuf      string
-	currentTopic string
-	confirmDel   bool
-	pendingDel   *storage.Task
-	meta         *metaState
-	renameID     int
+	store         *storage.Store
+	cfg           config.Config
+	tasks         []storage.Task
+	cursor        int
+	mode          mode
+	input         textinput.Model
+	status        string
+	filterDone    string
+	sortMode      string
+	sortBuf       string
+	currentTopic  string
+	confirmDel    bool
+	pendingDel    *storage.Task
+	meta          *metaState
+	renameID      int
+	renameTopic   string
+	renameIsTopic bool
 }
 
 func Run(store *storage.Store, cfg config.Config) error {
@@ -205,7 +207,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.tasks, err = m.store.FetchTasks()
 		if err == nil {
 			m.sortTasks()
-			m.cursor = clampCursor(m.cursor+1, len(m.visibleItems()))
+			vis = m.visibleItems()
+			m.cursor = clampCursor(m.cursor+1, len(vis))
 			m.status = "Toggled task"
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
@@ -223,6 +226,13 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.pendingDel = nil
 		m.status = "Delete ALL done tasks? y/n"
 	case m.cfg.Keys.Rename, "r":
+		vis := m.visibleItems()
+		if len(vis) == 0 {
+			return m, nil
+		}
+		if m.cursor < len(vis) && vis[m.cursor].kind == itemTopic && m.currentTopic == "" {
+			return m.startRenameTopic(vis[m.cursor].topic)
+		}
 		task, ok := m.currentTask()
 		if !ok {
 			return m, nil
@@ -818,11 +828,25 @@ func (m Model) startRename(t storage.Task) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) startRenameTopic(name string) (tea.Model, tea.Cmd) {
+	m.renameID = 0
+	m.renameTopic = name
+	m.renameIsTopic = true
+	m.input.SetValue(name)
+	m.input.Placeholder = "Rename topic"
+	m.input.Focus()
+	m.mode = modeRename
+	m.status = "Rename topic: Enter to save, Esc to cancel"
+	return m, nil
+}
+
 func (m Model) updateRenameMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case m.cfg.Keys.Cancel, "esc":
 		m.mode = modeList
 		m.renameID = 0
+		m.renameTopic = ""
+		m.renameIsTopic = false
 		m.input.Blur()
 		m.status = "Rename cancelled"
 		return m, nil
@@ -832,20 +856,41 @@ func (m Model) updateRenameMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 			m.status = "Title cannot be empty"
 			return m, nil
 		}
-		if err := m.store.UpdateTitle(m.renameID, title); err != nil {
-			m.status = fmt.Sprintf("rename failed: %v", err)
-			return m, nil
-		}
-		var err error
-		m.tasks, err = m.store.FetchTasks()
-		if err == nil {
-			m.sortTasks()
-			m.cursor = clampCursor(m.findTaskIndex(m.renameID), len(m.tasks))
-			m.status = "Renamed task"
+		if m.renameIsTopic {
+			if _, err := m.store.RenameTopic(m.renameTopic, title); err != nil {
+				m.status = fmt.Sprintf("rename failed: %v", err)
+				return m, nil
+			}
+			var err error
+			m.tasks, err = m.store.FetchTasks()
+			if err == nil {
+				m.sortTasks()
+				if m.currentTopic == m.renameTopic {
+					m.currentTopic = title
+				}
+				m.cursor = clampCursor(m.findTopicIndex(title), len(m.visibleItems()))
+				m.status = "Renamed topic"
+			} else {
+				m.status = fmt.Sprintf("reload failed: %v", err)
+			}
 		} else {
-			m.status = fmt.Sprintf("reload failed: %v", err)
+			if err := m.store.UpdateTitle(m.renameID, title); err != nil {
+				m.status = fmt.Sprintf("rename failed: %v", err)
+				return m, nil
+			}
+			var err error
+			m.tasks, err = m.store.FetchTasks()
+			if err == nil {
+				m.sortTasks()
+				m.cursor = clampCursor(m.findTaskIndex(m.renameID), len(m.tasks))
+				m.status = "Renamed task"
+			} else {
+				m.status = fmt.Sprintf("reload failed: %v", err)
+			}
 		}
 		m.renameID = 0
+		m.renameTopic = ""
+		m.renameIsTopic = false
 		m.mode = modeList
 		m.input.Blur()
 		return m, nil
@@ -1125,4 +1170,14 @@ func (m Model) currentTask() (storage.Task, bool) {
 		return storage.Task{}, false
 	}
 	return it.task, true
+}
+
+func (m Model) findTopicIndex(topic string) int {
+	vis := m.visibleItems()
+	for i, it := range vis {
+		if it.kind == itemTopic && it.topic == topic {
+			return i
+		}
+	}
+	return 0
 }

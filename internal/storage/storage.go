@@ -180,6 +180,14 @@ func (s *Store) DeleteDoneTasks() (int64, error) {
 	return res.RowsAffected()
 }
 
+func (s *Store) RenameTopic(oldName, newName string) (int64, error) {
+	res, err := s.db.Exec(`UPDATE tasks SET project = ? WHERE project = ?;`, newName, oldName)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) UpdateTitle(id int, title string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET title = ? WHERE id = ?;`, title, id)
 	return err
