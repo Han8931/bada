@@ -1,0 +1,15 @@
+db_path = "todo.db"
+default_filter = "all"
+
+[keys]
+quit = "q"
+add = "a"
+up = "k"
+down = "j"
+toggle = " "
+delete = "d"
+detail = "enter"
+confirm = "enter"
+cancel = "esc"
+edit = "e"
+

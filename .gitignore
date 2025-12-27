@@ -1,0 +1,30 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go build
+*.out
+bin/
+
+# Dependencies
+vendor/
+
+# IDE/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local data/config
+config.toml
+todo.db
+
+# Coverage / logs
+coverage.*
+*.log
+
