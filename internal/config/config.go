@@ -13,24 +13,25 @@ const (
 )
 
 type Keymap struct {
-	Quit         string `toml:"quit"`
-	Add          string `toml:"add"`
-	Up           string `toml:"up"`
-	Down         string `toml:"down"`
-	Toggle       string `toml:"toggle"`
-	Delete       string `toml:"delete"`
-	Detail       string `toml:"detail"`
-	Confirm      string `toml:"confirm"`
-	Cancel       string `toml:"cancel"`
-	Edit         string `toml:"edit"`
-	Rename       string `toml:"rename"`
-	PriorityUp   string `toml:"priority_up"`
-	PriorityDown string `toml:"priority_down"`
-	DueForward   string `toml:"due_forward"`
-	DueBack      string `toml:"due_back"`
-	SortDue      string `toml:"sort_due"`
-	SortPriority string `toml:"sort_priority"`
-	SortCreated  string `toml:"sort_created"`
+	Quit          string `toml:"quit"`
+	Add           string `toml:"add"`
+	Up            string `toml:"up"`
+	Down          string `toml:"down"`
+	Toggle        string `toml:"toggle"`
+	Delete        string `toml:"delete"`
+	Detail        string `toml:"detail"`
+	Confirm       string `toml:"confirm"`
+	Cancel        string `toml:"cancel"`
+	Edit          string `toml:"edit"`
+	Rename        string `toml:"rename"`
+	PriorityUp    string `toml:"priority_up"`
+	PriorityDown  string `toml:"priority_down"`
+	DueForward    string `toml:"due_forward"`
+	DueBack       string `toml:"due_back"`
+	SortDue       string `toml:"sort_due"`
+	SortPriority  string `toml:"sort_priority"`
+	SortCreated   string `toml:"sort_created"`
+	DeleteAllDone string `toml:"delete_all_done"`
 }
 
 type Config struct {
@@ -74,24 +75,25 @@ func defaultConfig() Config {
 		DBPath:        DefaultDBName,
 		DefaultFilter: "all",
 		Keys: Keymap{
-			Quit:         "q",
-			Add:          "a",
-			Up:           "k",
-			Down:         "j",
-			Toggle:       " ",
-			Delete:       "d",
-			Detail:       "enter",
-			Confirm:      "enter",
-			Cancel:       "esc",
-			Edit:         "e",
-			Rename:       "r",
-			PriorityUp:   "+",
-			PriorityDown: "-",
-			DueForward:   "]",
-			DueBack:      "[",
-			SortDue:      "sd",
-			SortPriority: "sp",
-			SortCreated:  "st",
+			Quit:          "q",
+			Add:           "a",
+			Up:            "k",
+			Down:          "j",
+			Toggle:        " ",
+			Delete:        "d",
+			Detail:        "enter",
+			Confirm:       "enter",
+			Cancel:        "esc",
+			Edit:          "e",
+			Rename:        "r",
+			PriorityUp:    "+",
+			PriorityDown:  "-",
+			DueForward:    "]",
+			DueBack:       "[",
+			SortDue:       "sd",
+			SortPriority:  "sp",
+			SortCreated:   "st",
+			DeleteAllDone: "D",
 		},
 	}
 }

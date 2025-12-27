@@ -217,6 +217,10 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.confirmDel = true
 		m.pendingDel = &t
 		m.status = fmt.Sprintf("Delete \"%s\"? y/n", t.Title)
+	case m.cfg.Keys.DeleteAllDone:
+		m.confirmDel = true
+		m.pendingDel = nil
+		m.status = "Delete ALL done tasks? y/n"
 	case m.cfg.Keys.Rename:
 		if len(m.tasks) == 0 {
 			return m, nil
@@ -265,7 +269,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		task := m.tasks[m.cursor]
 		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, humanDone(task.Done))
 		if task.Project != "" {
-			info += " • project:" + task.Project
+			info += " • topic:" + task.Project
 		}
 		if strings.TrimSpace(task.Tags) != "" {
 			info += " • tags:" + task.Tags
@@ -315,6 +319,9 @@ func (m Model) View() string {
 		b.WriteString("Field: " + m.currentMetaLabel())
 		b.WriteString("\n")
 		b.WriteString(m.input.View())
+	} else if m.mode == modeAdd {
+		b.WriteString("Add task: ")
+		b.WriteString(m.input.View())
 	} else if m.mode == modeRename {
 		b.WriteString("Rename task: Enter to save, Esc to cancel")
 		b.WriteString("\n\n")
@@ -342,7 +349,22 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "y", "Y":
 		if m.pendingDel == nil {
-			m.status = "Nothing to delete"
+			// delete all done
+			n, err := m.store.DeleteDoneTasks()
+			if err != nil {
+				m.status = fmt.Sprintf("delete failed: %v", err)
+				m.confirmDel = false
+				return m, nil
+			}
+			var errReload error
+			m.tasks, errReload = m.store.FetchTasks()
+			if errReload == nil {
+				m.sortTasks()
+				m.cursor = clampCursor(m.cursor, len(m.tasks))
+				m.status = fmt.Sprintf("Deleted %d done tasks", n)
+			} else {
+				m.status = fmt.Sprintf("reload failed: %v", errReload)
+			}
 			m.confirmDel = false
 			return m, nil
 		}
@@ -526,7 +548,7 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 }
 
 func metaFields() []string {
-	return []string{"title", "project", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurring (y/n)"}
+	return []string{"title", "topic", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurring (y/n)"}
 }
 
 func (ms metaState) currentLabel() string {
@@ -686,7 +708,7 @@ func (m Model) renderMetadataPanel() string {
 	b.WriteString("Metadata\n")
 	b.WriteString(fmt.Sprintf("Title     : %s\n", t.Title))
 	b.WriteString(fmt.Sprintf("Done      : %s\n", humanDone(t.Done)))
-	b.WriteString(fmt.Sprintf("Project   : %s\n", emptyPlaceholder(t.Project)))
+	b.WriteString(fmt.Sprintf("Topic     : %s\n", emptyPlaceholder(t.Project)))
 	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(t.Tags)))
 	b.WriteString(fmt.Sprintf("Priority  : %d\n", t.Priority))
 	b.WriteString(fmt.Sprintf("Due       : %s\n", formatDate(t.Due)))

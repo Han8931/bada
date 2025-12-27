@@ -20,4 +20,5 @@ due_back = "["
 sort_due = "sd"
 sort_priority = "sp"
 sort_created = "st"
+delete_all_done = "D"
 

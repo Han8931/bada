@@ -172,6 +172,14 @@ func (s *Store) DeleteTask(id int) error {
 	return err
 }
 
+func (s *Store) DeleteDoneTasks() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM tasks WHERE done = 1;`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) UpdateTitle(id int, title string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET title = ? WHERE id = ?;`, title, id)
 	return err
