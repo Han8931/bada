@@ -283,68 +283,27 @@ func (m model) View() string {
 	b.WriteString("Todo (Bubble Tea + SQLite)")
 	b.WriteString("\n\n")
 
-	if m.meta != nil {
-		b.WriteString(fmt.Sprintf("Editing metadata: %s (field %d/6)\n\n", m.currentMetaLabel(), m.meta.index+1))
-		b.WriteString(m.metaPrompt())
-		b.WriteString("\n")
-		b.WriteString(m.input.View())
-		b.WriteString("\n\n")
-		b.WriteString(m.status)
-		return b.String()
-	}
-
 	if len(m.tasks) == 0 {
 		b.WriteString("No tasks yet. Press 'a' to add one.")
 	} else {
-		for i, t := range m.tasks {
-			cursor := " "
-			if m.cursor == i && m.mode == modeList {
-				cursor = ">"
-			}
-
-			checkbox := "[ ]"
-			if t.Done {
-				checkbox = "[x]"
-			}
-
-			extras := make([]string, 0, 3)
-			if t.Project != "" {
-				extras = append(extras, "P:"+t.Project)
-			}
-			if strings.TrimSpace(t.Tags) != "" {
-				extras = append(extras, "T:"+t.Tags)
-			}
-			if t.Due.Valid {
-				extras = append(extras, "D:"+t.Due.Time.Format("2006-01-02"))
-			}
-			if t.Start.Valid {
-				extras = append(extras, "S:"+t.Start.Time.Format("2006-01-02"))
-			}
-			if t.Priority != 0 {
-				extras = append(extras, fmt.Sprintf("Prio:%d", t.Priority))
-			}
-			if t.Recurring {
-				extras = append(extras, "R")
-			}
-
-			body := fmt.Sprintf("%s %s %s", cursor, checkbox, t.Title)
-			if len(extras) > 0 {
-				body += " [" + strings.Join(extras, " | ") + "]"
-			}
-
-			b.WriteString(body)
-			b.WriteString("\n")
-		}
+		b.WriteString(m.renderTaskList())
 	}
 
-	b.WriteString("\n")
-	if m.mode == modeAdd {
-		b.WriteString("Add Task: ")
-		b.WriteString(m.input.View())
+	b.WriteString("\n---\n")
+
+	if m.meta != nil {
+		b.WriteString("Metadata editor (tab/shift+tab or h/j/k/l to move, enter to save/next, esc to cancel)")
+		b.WriteString("\n\n")
+		b.WriteString(m.renderMetaBox())
 		b.WriteString("\n")
+		b.WriteString("Field: " + m.currentMetaLabel())
+		b.WriteString("\n")
+		b.WriteString(m.input.View())
+	} else {
+		b.WriteString(m.renderMetadataPanel())
 	}
 
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 	b.WriteString(m.status)
 	b.WriteString("\n")
 	b.WriteString(renderHelp(m.cfg.Keys))
@@ -392,6 +351,50 @@ func renderHelp(k Keymap) string {
 		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Quit)
 }
 
+func (m model) renderTaskList() string {
+	var b strings.Builder
+	for i, t := range m.tasks {
+		cursor := " "
+		if m.cursor == i && m.mode == modeList {
+			cursor = ">"
+		}
+
+		checkbox := "[ ]"
+		if t.Done {
+			checkbox = "[x]"
+		}
+
+		extras := make([]string, 0, 6)
+		if t.Project != "" {
+			extras = append(extras, "P:"+t.Project)
+		}
+		if strings.TrimSpace(t.Tags) != "" {
+			extras = append(extras, "T:"+t.Tags)
+		}
+		if t.Due.Valid {
+			extras = append(extras, "D:"+t.Due.Time.Format("2006-01-02"))
+		}
+		if t.Start.Valid {
+			extras = append(extras, "S:"+t.Start.Time.Format("2006-01-02"))
+		}
+		if t.Priority != 0 {
+			extras = append(extras, fmt.Sprintf("Prio:%d", t.Priority))
+		}
+		if t.Recurring {
+			extras = append(extras, "R")
+		}
+
+		body := fmt.Sprintf("%s %s %s", cursor, checkbox, t.Title)
+		if len(extras) > 0 {
+			body += " [" + strings.Join(extras, " | ") + "]"
+		}
+
+		b.WriteString(body)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func (m model) startMetadataEdit(t task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
 		taskID:    t.ID,
@@ -407,7 +410,7 @@ func (m model) startMetadataEdit(t task) (tea.Model, tea.Cmd) {
 	m.input.Placeholder = m.meta.currentLabel()
 	m.input.Focus()
 	m.mode = modeMetadata
-	m.status = "Edit metadata: Enter to save field, Esc to cancel"
+	m.status = "Edit metadata: tab/hjkl to move, enter to save/next, esc to cancel"
 	return m, nil
 }
 
@@ -418,6 +421,26 @@ func (m model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		m.mode = modeList
 		m.input.Blur()
 		m.status = "Edit cancelled"
+		return m, nil
+	case "tab", "right", "l", "j":
+		if m.meta == nil {
+			return m, nil
+		}
+		m.meta.setCurrentValue(m.input.Value())
+		m.meta.index = wrapIndex(m.meta.index+1, len(metaFields()))
+		m.input.SetValue(m.meta.currentValue())
+		m.input.Placeholder = m.meta.currentLabel()
+		m.status = m.metaPrompt()
+		return m, nil
+	case "shift+tab", "left", "h", "k":
+		if m.meta == nil {
+			return m, nil
+		}
+		m.meta.setCurrentValue(m.input.Value())
+		m.meta.index = wrapIndex(m.meta.index-1, len(metaFields()))
+		m.input.SetValue(m.meta.currentValue())
+		m.input.Placeholder = m.meta.currentLabel()
+		m.status = m.metaPrompt()
 		return m, nil
 	case m.cfg.Keys.Confirm, "enter":
 		if m.meta == nil {
@@ -543,7 +566,7 @@ func (m model) metaPrompt() string {
 	if m.meta == nil {
 		return ""
 	}
-	return fmt.Sprintf("Editing %s (field %d of %d). Enter to advance, Esc to cancel.",
+	return fmt.Sprintf("Editing %s (field %d of %d). Enter to advance, Esc to cancel, tab/hjkl to move.",
 		m.meta.currentLabel(), m.meta.index+1, len(metaFields()))
 }
 
@@ -591,6 +614,70 @@ func (m model) currentMetaLabel() string {
 		return ""
 	}
 	return m.meta.currentLabel()
+}
+
+func (m model) renderMetaBox() string {
+	if m.meta == nil {
+		return ""
+	}
+	fields := metaFields()
+	values := []string{
+		m.meta.project,
+		m.meta.tags,
+		m.meta.priority,
+		m.meta.due,
+		m.meta.start,
+		m.meta.recurring,
+	}
+	var b strings.Builder
+	for i, name := range fields {
+		prefix := " "
+		if i == m.meta.index {
+			prefix = ">"
+		}
+		val := values[i]
+		if strings.TrimSpace(val) == "" {
+			val = "(empty)"
+		}
+		b.WriteString(fmt.Sprintf("%s %-18s : %s\n", prefix, name, val))
+	}
+	return b.String()
+}
+
+func wrapIndex(idx, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	idx %= n
+	if idx < 0 {
+		idx += n
+	}
+	return idx
+}
+
+func (m model) renderMetadataPanel() string {
+	if len(m.tasks) == 0 {
+		return "No task selected"
+	}
+	t := m.tasks[clampCursor(m.cursor, len(m.tasks))]
+	var b strings.Builder
+	b.WriteString("Metadata\n")
+	b.WriteString(fmt.Sprintf("Title     : %s\n", t.Title))
+	b.WriteString(fmt.Sprintf("Done      : %s\n", humanDone(t.Done)))
+	b.WriteString(fmt.Sprintf("Project   : %s\n", emptyPlaceholder(t.Project)))
+	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(t.Tags)))
+	b.WriteString(fmt.Sprintf("Priority  : %d\n", t.Priority))
+	b.WriteString(fmt.Sprintf("Due       : %s\n", formatDate(t.Due)))
+	b.WriteString(fmt.Sprintf("Start     : %s\n", formatDate(t.Start)))
+	b.WriteString(fmt.Sprintf("Recurring : %t\n", t.Recurring))
+	return b.String()
+}
+
+func emptyPlaceholder(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "(empty)"
+	}
+	return v
 }
 func clampCursor(cur, n int) int {
 	if n <= 0 {
