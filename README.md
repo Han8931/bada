@@ -16,7 +16,8 @@
 - Rename: r (shows current/new), Enter saves, Esc cancels.
 - Priority: + / - (max 10).
 - Due shift: ] / [ (+1d/-1d).
-- Sort: s then d/p/t.
+- Sort: s then d/p/t/a/s (due/priority/created/auto/state).
+- gg / G bindings (jump to top / bottom)
 
 ## Trash
 

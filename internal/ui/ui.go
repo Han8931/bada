@@ -54,6 +54,7 @@ type Model struct {
 	filterDone    string
 	sortMode      string
 	sortBuf       string
+	pendingSort   bool
 	currentTopic  string
 	confirmDel    bool
 	pendingDel    *storage.Task
@@ -90,7 +91,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 		input:         ti,
 		mode:          modeList,
 		filterDone:    strings.ToLower(cfg.DefaultFilter),
-		sortMode:      "created",
+		sortMode:      "auto",
 		currentTopic:  "",
 	}
 	m.sortTasks()
@@ -190,6 +191,7 @@ func (m Model) updateAddMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
+	m = m.flushPendingSort(key)
 	vis := m.visibleItems()
 	switch key {
 	case "ctrl+c", m.cfg.Keys.Quit:
@@ -268,12 +270,18 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.startRename(task)
-	case m.cfg.Keys.PriorityUp, "+":
+	case "+":
+		if m.processSortKey("+") {
+			return m, nil
+		}
 		if _, ok := m.currentTask(); !ok {
 			return m, nil
 		}
 		return m.bumpPriority(1)
-	case m.cfg.Keys.PriorityDown, "-":
+	case "-":
+		if m.processSortKey("-") {
+			return m, nil
+		}
 		if _, ok := m.currentTask(); !ok {
 			return m, nil
 		}
@@ -656,8 +664,8 @@ func renderHelp(k config.Keymap) string {
 
 func (m Model) renderTaskList() string {
 	var b strings.Builder
-	b.WriteString("   C State    Title                                   Due        Topic\n")
-	b.WriteString("   --- ------- ---------------------------------------- ---------- ----------------\n")
+	b.WriteString("   C State    Title                                   Due\n")
+	b.WriteString("   --- ------- ---------------------------------------- ----------\n")
 	items := m.visibleItems()
 	for i, it := range items {
 		cursor := " "
@@ -682,7 +690,7 @@ func (m Model) renderTaskList() string {
 			if due == "" {
 				due = "pending"
 			}
-			body := fmt.Sprintf("%s %s %-7s %-40s %-10s %-10s", cursor, checkbox, state, title, due, it.task.Project)
+			body := fmt.Sprintf("%s %s %-7s %-40s %-10s", cursor, checkbox, state, title, due)
 			if badge := overdueBadge(it.task); badge != "" {
 				body += " " + badge
 			}
@@ -800,27 +808,66 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		m.input.Placeholder = m.meta.currentLabel()
 		m.status = m.metaPrompt()
 		return m, nil
+	case "+":
+		if m.meta != nil && m.meta.index == 3 {
+			val, _ := strconv.Atoi(filterDigits(m.input.Value()))
+			if val < 5 {
+				val++
+			}
+			m.meta.priority = fmt.Sprintf("%d", val)
+			m.input.SetValue(m.meta.priority)
+			m.status = m.metaPrompt()
+			return m, nil
+		}
+		// not editing priority; handle as normal input so characters like '-' go through for dates
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.applyMetaInputSanitizer()
+		return m, cmd
+	case "-":
+		if m.meta != nil && m.meta.index == 3 {
+			val, _ := strconv.Atoi(filterDigits(m.input.Value()))
+			if val > 0 {
+				val--
+			}
+			m.meta.priority = fmt.Sprintf("%d", val)
+			m.input.SetValue(m.meta.priority)
+			m.status = m.metaPrompt()
+			return m, nil
+		}
+		// not editing priority; handle as normal input so '-' works in dates
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.applyMetaInputSanitizer()
+		return m, cmd
 	default:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
-		// sanitize input per field type
-		if m.meta != nil {
-			switch m.meta.index {
-			case 3: // priority
-				m.input.SetValue(filterDigits(m.input.Value()))
-			case 4, 5: // dates
-				m.input.SetValue(filterDate(m.input.Value()))
-			case 6: // recurrence rule
-				// allow only letters/dots
-				m.input.SetValue(filterRule(m.input.Value()))
-			case 7: // interval
-				m.input.SetValue(filterDigits(m.input.Value()))
-			case 8: // recurring flag
-				m.input.SetValue(filterYN(m.input.Value()))
-			}
-		}
+		m.applyMetaInputSanitizer()
 		return m, cmd
 	}
+	return m, nil
+}
+
+func (m *Model) applyMetaInputSanitizer() {
+	// sanitize input per field type and store it
+	if m.meta == nil {
+		return
+	}
+	switch m.meta.index {
+	case 3: // priority
+		m.input.SetValue(filterDigits(m.input.Value()))
+	case 4, 5: // dates
+		m.input.SetValue(filterDate(m.input.Value()))
+	case 6: // recurrence rule
+		// allow only letters/dots
+		m.input.SetValue(filterRule(m.input.Value()))
+	case 7: // interval
+		m.input.SetValue(filterDigits(m.input.Value()))
+	case 8: // recurring flag
+		m.input.SetValue(filterYN(m.input.Value()))
+	}
+	m.meta.setCurrentValue(m.input.Value())
 }
 
 func metaFields() []string {
@@ -885,6 +932,21 @@ func (m Model) metaPrompt() string {
 	}
 	return fmt.Sprintf("Editing %s (field %d of %d). Enter to advance, Esc to cancel, tab/hjkl to move.",
 		m.meta.currentLabel(), m.meta.index+1, len(metaFields()))
+}
+
+func (m Model) flushPendingSort(nextKey string) Model {
+	if !m.pendingSort || nextKey == "+" || nextKey == "-" {
+		return m
+	}
+	tasks, err := m.store.FetchTasks()
+	if err != nil {
+		m.status = fmt.Sprintf("reload failed: %v", err)
+		return m
+	}
+	m.tasks = tasks
+	m.sortTasks()
+	m.pendingSort = false
+	return m
 }
 
 func (m Model) applyMetadataAndReload() (Model, error) {
@@ -1246,7 +1308,7 @@ func (m Model) findTaskIndex(id int) int {
 			return i
 		}
 	}
-	return 0
+	return -1
 }
 
 func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
@@ -1262,15 +1324,13 @@ func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("priority failed: %v", err)
 		return m, nil
 	}
-	var err error
-	m.tasks, err = m.store.FetchTasks()
-	if err == nil {
-		m.sortTasks()
-		m.cursor = clampCursor(m.findTaskIndex(t.ID), len(m.tasks))
-		m.status = fmt.Sprintf("Priority set to %d", newPrio)
-	} else {
-		m.status = fmt.Sprintf("reload failed: %v", err)
+	if idx := m.findTaskIndex(t.ID); idx >= 0 && idx < len(m.tasks) {
+		m.tasks[idx].Priority = newPrio
 	}
+	// ensure current row shows updated priority immediately
+	m.tasks[m.cursor].Priority = newPrio
+	m.pendingSort = true
+	m.status = fmt.Sprintf("Priority set to %d", newPrio)
 	return m, nil
 }
 
@@ -1301,6 +1361,36 @@ func (m Model) lastTaskID() int {
 
 func (m *Model) sortTasks() {
 	switch m.sortMode {
+	case "auto":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			a := m.tasks[i]
+			b := m.tasks[j]
+			if a.Done != b.Done {
+				return !a.Done && b.Done
+			}
+			if a.Due.Valid && b.Due.Valid {
+				if !a.Due.Time.Equal(b.Due.Time) {
+					return a.Due.Time.Before(b.Due.Time)
+				}
+			} else if a.Due.Valid {
+				return true
+			} else if b.Due.Valid {
+				return false
+			}
+			if a.Priority != b.Priority {
+				return a.Priority > b.Priority
+			}
+			return a.ID < b.ID
+		})
+	case "state":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			a := m.tasks[i]
+			b := m.tasks[j]
+			if a.Done != b.Done {
+				return !a.Done && b.Done
+			}
+			return a.ID < b.ID
+		})
 	case "due":
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			di, dj := m.tasks[i].Due, m.tasks[j].Due
@@ -1387,7 +1477,7 @@ func (m *Model) processSortKey(key string) bool {
 	}
 	if key == "s" {
 		m.sortBuf = "s"
-		m.status = "Sort: press d (due), p (priority), t (created)"
+		m.status = "Sort: press d (due), p (priority), t (created), a (auto), s (state)"
 		return true
 	}
 	if m.sortBuf == "s" {
@@ -1395,15 +1485,28 @@ func (m *Model) processSortKey(key string) bool {
 		case "d":
 			m.sortMode = "due"
 			m.sortTasks()
+			m.pendingSort = false
 			m.status = "Sorted by due date"
 		case "p":
 			m.sortMode = "priority"
 			m.sortTasks()
+			m.pendingSort = false
 			m.status = "Sorted by priority"
 		case "t":
 			m.sortMode = "created"
 			m.sortTasks()
+			m.pendingSort = false
 			m.status = "Sorted by created time"
+		case "a":
+			m.sortMode = "auto"
+			m.sortTasks()
+			m.pendingSort = false
+			m.status = "Sorted by auto (state/priority/due)"
+		case "s":
+			m.sortMode = "state"
+			m.sortTasks()
+			m.pendingSort = false
+			m.status = "Sorted by state (pending first)"
 		default:
 			m.status = "Sort cancelled"
 		}
@@ -1418,6 +1521,9 @@ func (m *Model) processSortKey(key string) bool {
 func (m *Model) processNavKey(key string) bool {
 	if key == "" {
 		return false
+	}
+	if m.pendingSort && key != "+" && key != "-" {
+		m.flushPendingSort(key)
 	}
 	if key == "g" {
 		if m.navBuf == "g" {
