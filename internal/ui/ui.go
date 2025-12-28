@@ -24,6 +24,7 @@ const (
 	modeRename
 	modeCommand
 	modeTrash
+	modeReport
 )
 
 type metaState struct {
@@ -49,6 +50,7 @@ type Model struct {
 	navBuf        string
 	trashCursor   int
 	mode          mode
+	report        string
 	input         textinput.Model
 	status        string
 	filterDone    string
@@ -89,12 +91,13 @@ func Run(store *storage.Store, cfg config.Config) error {
 		trashSelected: map[int]bool{},
 		status:        "",
 		input:         ti,
-		mode:          modeList,
+		mode:          modeReport,
 		filterDone:    strings.ToLower(cfg.DefaultFilter),
 		sortMode:      "auto",
 		currentTopic:  "",
 	}
 	m.sortTasks()
+	m.refreshReport()
 
 	program := tea.NewProgram(m)
 	_, err = program.Run()
@@ -113,6 +116,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.confirmTopic {
 			return m.updateDeleteTopicConfirm(msg.String())
+		}
+		if m.mode == modeReport {
+			return m.updateReportMode(msg.String(), msg)
 		}
 		if m.mode == modeTrash {
 			return m.updateTrashMode(msg.String(), msg)
@@ -367,7 +373,13 @@ func (m Model) View() string {
 	b.WriteString("bada (Bubble Tea + SQLite)")
 	b.WriteString("\n\n")
 
-	b.WriteString(m.renderTaskList())
+	if m.mode == modeReport {
+		b.WriteString("Reminder Report")
+		b.WriteString("\n\n")
+		b.WriteString(m.report)
+	} else {
+		b.WriteString(m.renderTaskList())
+	}
 
 	b.WriteString("\n---\n")
 
@@ -379,6 +391,8 @@ func (m Model) View() string {
 		b.WriteString("Field: " + m.currentMetaLabel())
 		b.WriteString("\n")
 		b.WriteString(m.input.View())
+	} else if m.mode == modeReport {
+		b.WriteString("Press enter/esc/q to close, : for commands")
 	} else if m.mode == modeTrash {
 		b.WriteString("Trash (space to select, u to restore, esc to exit)")
 		b.WriteString("\n\n")
@@ -506,6 +520,13 @@ func (m Model) enterTrashView() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) enterReportView() (tea.Model, tea.Cmd) {
+	m.refreshReport()
+	m.mode = modeReport
+	m.status = "Reminder report"
+	return m, nil
+}
+
 func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.trashConfirm {
 		switch key {
@@ -565,6 +586,19 @@ func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		return m.confirmPurgeTrash()
 	}
 	return m, nil
+}
+
+func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "enter", m.cfg.Keys.Quit, "q":
+		m.mode = modeList
+		m.status = "Report closed"
+		return m, nil
+	case ":":
+		return m.startCommand()
+	default:
+		return m, nil
+	}
 }
 
 func (m Model) toggleTrashSelection(idx int) {
@@ -935,7 +969,7 @@ func (m Model) metaPrompt() string {
 }
 
 func (m Model) flushPendingSort(nextKey string) Model {
-	if !m.pendingSort || nextKey == "+" || nextKey == "-" {
+	if !m.pendingSort || nextKey == "+" || nextKey == "-" || nextKey == "[" || nextKey == "]" {
 		return m
 	}
 	tasks, err := m.store.FetchTasks()
@@ -1107,6 +1141,59 @@ func (m Model) renderMetaBox() string {
 	return b.String()
 }
 
+func (m *Model) refreshReport() {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	tomorrow := today.Add(24 * time.Hour)
+	soon := today.Add(72 * time.Hour)
+
+	var overdue, todayList, upcoming []storage.Task
+	for _, t := range m.tasks {
+		if t.Done || !t.Due.Valid {
+			continue
+		}
+		d := t.Due.Time
+		if d.Before(today) {
+			overdue = append(overdue, t)
+			continue
+		}
+		if !d.After(tomorrow.Add(-time.Nanosecond)) && d.After(today.Add(-time.Nanosecond)) {
+			todayList = append(todayList, t)
+			continue
+		}
+		if d.Before(soon) {
+			upcoming = append(upcoming, t)
+			continue
+		}
+	}
+
+	var b strings.Builder
+	if len(overdue) == 0 && len(todayList) == 0 && len(upcoming) == 0 {
+		b.WriteString("All clear. No due tasks.\n")
+	} else {
+		writeSection := func(title string, tasks []storage.Task) {
+			b.WriteString(title)
+			b.WriteString(fmt.Sprintf(" (%d)\n", len(tasks)))
+			for _, t := range tasks {
+				due := formatDate(t.Due)
+				b.WriteString(fmt.Sprintf("  #%d %s (due %s)\n", t.ID, t.Title, due))
+			}
+			b.WriteString("\n")
+		}
+		if len(overdue) > 0 {
+			writeSection("Overdue", overdue)
+		}
+		if len(todayList) > 0 {
+			writeSection("Due Today", todayList)
+		}
+		if len(upcoming) > 0 {
+			writeSection("Upcoming (3d)", upcoming)
+		}
+	}
+	m.report = b.String()
+	m.status = "Reminder report"
+}
+
 func wrapIndex(idx, n int) int {
 	if n <= 0 {
 		return 0
@@ -1148,6 +1235,9 @@ func emptyPlaceholder(v string) string {
 
 func (m Model) renderStatusBar() string {
 	modeLabel := m.modeLabel()
+	if m.mode == modeReport {
+		return fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status)
+	}
 	if m.mode == modeTrash {
 		sel := m.selectedTrashCount()
 		total := len(m.trash)
@@ -1179,6 +1269,8 @@ func (m Model) modeLabel() string {
 		return "COMMAND"
 	case modeTrash:
 		return "TRASH"
+	case modeReport:
+		return "REPORT"
 	default:
 		return "?"
 	}
@@ -1206,6 +1298,8 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		switch cmdLower {
 		case "help":
 			m.status = "Commands: help | sort (s then d/p/t) | rename (r) | priority +/- | due ]/["
+		case "agenda":
+			return m.enterReportView()
 		default:
 			m.status = fmt.Sprintf("unknown command: %s", cmd)
 		}
@@ -1340,15 +1434,16 @@ func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("shift due failed: %v", err)
 		return m, nil
 	}
-	var err error
-	m.tasks, err = m.store.FetchTasks()
-	if err == nil {
-		m.sortTasks()
-		m.cursor = clampCursor(m.findTaskIndex(t.ID), len(m.tasks))
-		m.status = fmt.Sprintf("Due shifted by %+dd", days)
-	} else {
-		m.status = fmt.Sprintf("reload failed: %v", err)
+	base := time.Now().UTC()
+	if t.Due.Valid {
+		base = t.Due.Time
 	}
+	newTime := base.AddDate(0, 0, days)
+	if idx := m.findTaskIndex(t.ID); idx >= 0 && idx < len(m.tasks) {
+		m.tasks[idx].Due = sql.NullTime{Time: newTime, Valid: true}
+	}
+	m.pendingSort = true
+	m.status = fmt.Sprintf("Due shifted by %+dd", days)
 	return m, nil
 }
 
