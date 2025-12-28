@@ -18,6 +18,7 @@
 - Due shift: ] / [ (+1d/-1d).
 - Sort: s then d/p/t/a/s (due/priority/created/auto/state).
 - gg / G bindings (jump to top / bottom)
+- Search: / opens a query prompt; Enter applies, Esc cancels (submit empty to clear).
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 
 ## Trash
@@ -32,7 +33,6 @@
 * Agenda reporting config (+7 or +3)
 * Note feature
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
-* **Advanced Filtering:** Fuzzy / Boolean search (e.g., `project:work AND tag:urgent`), quick toggles for status, and saved filter views.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * **Interface Customization:** Fully themeable TUI with support for 256-colors/TrueColor and configurable border styles.
@@ -43,6 +43,7 @@
 * **Natural Language Intake:** Convert "Buy milk tomorrow at 5pm" into a structured task with a due date and tags.
 * **Strategic Advisory:** AI analyzes your task list to suggest the most efficient order of operations (e.g., "Group these three errands together to save time").
 * **Automated Project Planning:** Generate a multi-step task breakdown from a single high-level goal (e.g., "Plan a 3-day hiking trip").
+* Writing features: email or report. 
 
 
 This is a comprehensive and well-thought-out feature set. It strikes a great balance between a "power user" CLI/TUI application and modern AI-driven productivity.

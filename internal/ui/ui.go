@@ -23,6 +23,7 @@ const (
 	modeMetadata
 	modeRename
 	modeCommand
+	modeSearch
 	modeTrash
 	modeReport
 )
@@ -59,6 +60,7 @@ type Model struct {
 	sortBuf       string
 	pendingSort   bool
 	currentTopic  string
+	searchQuery   string
 	confirmDel    bool
 	pendingDel    *storage.Task
 	confirmTopic  bool
@@ -131,6 +133,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeCommand {
 			return m.updateCommandMode(msg.String(), msg)
 		}
+		if m.mode == modeSearch {
+			return m.updateSearchMode(msg.String(), msg)
+		}
 		if m.confirmDel {
 			return m.updateDeleteConfirm(msg.String())
 		}
@@ -185,7 +190,7 @@ func (m Model) updateAddMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Added task"
 			m.sortTasks()
-			m.cursor = clampCursor(m.findTaskIndex(m.lastTaskID()), len(m.tasks))
+			m.cursor = clampCursor(m.findVisibleTaskIndex(m.lastTaskID()), len(m.visibleItems()))
 		}
 		m.input.SetValue("")
 		m.input.Blur()
@@ -206,6 +211,15 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case ":":
 		return m.startCommand()
+	case m.cfg.Keys.Search, "/":
+		return m.startSearch()
+	case m.cfg.Keys.Cancel, "esc":
+		if m.searchActive() {
+			m.searchQuery = ""
+			m.cursor = clampCursor(0, len(m.visibleItems()))
+			m.status = "Search cleared"
+		}
+		return m, nil
 	case "h", "left":
 		if m.currentTopic != "" {
 			m.currentTopic = ""
@@ -411,6 +425,9 @@ func (m Model) View() string {
 	} else if m.mode == modeCommand {
 		b.WriteString(":")
 		b.WriteString(m.input.View())
+	} else if m.mode == modeSearch {
+		b.WriteString("Search: ")
+		b.WriteString(m.input.View())
 	} else {
 		b.WriteString(m.renderMetadataPanel())
 	}
@@ -440,7 +457,7 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 			m.tasks, errReload = m.store.FetchTasks()
 			if errReload == nil {
 				m.sortTasks()
-				m.cursor = clampCursor(m.cursor, len(m.tasks))
+				m.cursor = clampCursor(m.cursor, len(m.visibleItems()))
 				m.status = fmt.Sprintf("Moved %d done tasks to trash", n)
 			} else {
 				m.status = fmt.Sprintf("reload failed: %v", errReload)
@@ -458,7 +475,7 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 		m.tasks, err = m.store.FetchTasks()
 		if err == nil {
 			m.sortTasks()
-			m.cursor = clampCursor(m.cursor, len(m.tasks))
+			m.cursor = clampCursor(m.cursor, len(m.visibleItems()))
 			m.status = "Deleted task (moved to trash)"
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
@@ -694,15 +711,20 @@ func (m Model) confirmPurgeTrash() (tea.Model, tea.Cmd) {
 }
 
 func renderHelp(k config.Keymap) string {
-	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s quit",
-		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Quit)
+	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
+		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Search, k.Quit)
 }
 
 func (m Model) renderTaskList() string {
 	var b strings.Builder
+
+	items := m.visibleItems()
+	if m.searchActive() {
+		b.WriteString(fmt.Sprintf("Search: %q (%d result(s))\n", m.searchQuery, len(items)))
+	}
+
 	b.WriteString("   C State    Title                                   Due\n")
 	b.WriteString("   --- ------- ---------------------------------------- ----------\n")
-	items := m.visibleItems()
 	for i, it := range items {
 		cursor := " "
 		if m.cursor == i && m.mode == modeList {
@@ -739,9 +761,15 @@ func (m Model) renderTaskList() string {
 			if recBadge != "" {
 				body += " " + recBadge
 			}
+			if m.searchActive() && strings.TrimSpace(it.task.Project) != "" {
+				body += " [" + it.task.Project + "]"
+			}
 			b.WriteString(body)
 			b.WriteString("\n")
 		}
+	}
+	if len(items) == 0 {
+		b.WriteString("(no tasks)\n")
 	}
 	return b.String()
 }
@@ -1044,12 +1072,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 	}
 	m.tasks = tasks
 	m.sortTasks()
-	for i, t := range m.tasks {
-		if t.ID == taskID {
-			m.cursor = clampCursor(i, len(m.tasks))
-			break
-		}
-	}
+	m.cursor = clampCursor(m.findVisibleTaskIndex(taskID), len(m.visibleItems()))
 	return m, nil
 }
 
@@ -1301,12 +1324,16 @@ func (m Model) renderStatusBar() string {
 		}
 		return fmt.Sprintf("[bada] [%s] cur:%d/%d sel:%d path:%s  %s", modeLabel, cur, total, sel, m.store.TrashDir(), m.status)
 	}
-	total := len(m.tasks)
+	total := len(m.visibleItems())
 	cursor := 0
 	if total > 0 {
-		cursor = m.cursor + 1
+		cursor = clampCursor(m.cursor, total) + 1
 	}
-	return fmt.Sprintf("[bada] [%s] sort:%s  %d/%d  %s", modeLabel, m.sortMode, cursor, total, m.status)
+	search := ""
+	if m.searchActive() {
+		search = fmt.Sprintf(" search:%q", m.searchQuery)
+	}
+	return fmt.Sprintf("[bada] [%s] sort:%s%s  %d/%d  %s", modeLabel, m.sortMode, search, cursor, total, m.status)
 }
 
 func (m Model) modeLabel() string {
@@ -1321,6 +1348,8 @@ func (m Model) modeLabel() string {
 		return "RENAME"
 	case modeCommand:
 		return "COMMAND"
+	case modeSearch:
+		return "SEARCH"
 	case modeTrash:
 		return "TRASH"
 	case modeReport:
@@ -1336,6 +1365,15 @@ func (m Model) startCommand() (tea.Model, tea.Cmd) {
 	m.input.Placeholder = ""
 	m.input.Focus()
 	m.status = "Command: type 'help' and Enter, Esc to cancel"
+	return m, nil
+}
+
+func (m Model) startSearch() (tea.Model, tea.Cmd) {
+	m.mode = modeSearch
+	m.input.SetValue(m.searchQuery)
+	m.input.Placeholder = "Search tasks"
+	m.input.Focus()
+	m.status = "Search: type a query, Enter to apply, Esc to cancel"
 	return m, nil
 }
 
@@ -1364,6 +1402,31 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		var c tea.Cmd
 		m.input, c = m.input.Update(msg)
 		return m, c
+	}
+}
+
+func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case m.cfg.Keys.Cancel, "esc":
+		m.mode = modeList
+		m.input.Blur()
+		m.status = "Search cancelled"
+		return m, nil
+	case m.cfg.Keys.Confirm, "enter":
+		m.searchQuery = strings.TrimSpace(m.input.Value())
+		m.mode = modeList
+		m.input.Blur()
+		if m.searchActive() {
+			m.status = fmt.Sprintf("Search: %s", m.searchQuery)
+		} else {
+			m.status = "Search cleared"
+		}
+		m.cursor = clampCursor(0, len(m.visibleItems()))
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	}
 }
 
@@ -1431,7 +1494,7 @@ func (m Model) updateRenameMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 			m.tasks, err = m.store.FetchTasks()
 			if err == nil {
 				m.sortTasks()
-				m.cursor = clampCursor(m.findTaskIndex(m.renameID), len(m.tasks))
+				m.cursor = clampCursor(m.findVisibleTaskIndex(m.renameID), len(m.visibleItems()))
 				m.status = "Renamed task"
 			} else {
 				m.status = fmt.Sprintf("reload failed: %v", err)
@@ -1453,6 +1516,16 @@ func (m Model) updateRenameMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 func (m Model) findTaskIndex(id int) int {
 	for i, t := range m.tasks {
 		if t.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m Model) findVisibleTaskIndex(id int) int {
+	items := m.visibleItems()
+	for i, it := range items {
+		if it.kind == itemTask && it.task.ID == id {
 			return i
 		}
 	}
@@ -1873,6 +1946,13 @@ func intervalString(v int) string {
 }
 
 func (m Model) visibleItems() []listItem {
+	if m.searchActive() {
+		return m.searchItems()
+	}
+	return m.defaultVisibleItems()
+}
+
+func (m Model) defaultVisibleItems() []listItem {
 	items := make([]listItem, 0)
 	if m.currentTopic == "" {
 		for _, topic := range []string{"RecentlyAdded", "RecentlyDone"} {
@@ -1886,25 +1966,73 @@ func (m Model) visibleItems() []listItem {
 				items = append(items, listItem{kind: itemTask, task: t})
 			}
 		}
-	} else {
-		switch m.currentTopic {
-		case "RecentlyAdded":
-			for _, t := range m.recentlyAdded(m.recentLimit) {
+		return items
+	}
+
+	switch m.currentTopic {
+	case "RecentlyAdded":
+		for _, t := range m.recentlyAdded(m.recentLimit) {
+			items = append(items, listItem{kind: itemTask, task: t})
+		}
+	case "RecentlyDone":
+		for _, t := range m.recentlyDone(m.recentLimit) {
+			items = append(items, listItem{kind: itemTask, task: t})
+		}
+	default:
+		for _, t := range m.tasks {
+			if t.Project == m.currentTopic {
 				items = append(items, listItem{kind: itemTask, task: t})
-			}
-		case "RecentlyDone":
-			for _, t := range m.recentlyDone(m.recentLimit) {
-				items = append(items, listItem{kind: itemTask, task: t})
-			}
-		default:
-			for _, t := range m.tasks {
-				if t.Project == m.currentTopic {
-					items = append(items, listItem{kind: itemTask, task: t})
-				}
 			}
 		}
 	}
 	return items
+}
+
+func (m Model) searchItems() []listItem {
+	query := strings.TrimSpace(m.searchQuery)
+	if query == "" {
+		return m.defaultVisibleItems()
+	}
+	q := strings.ToLower(query)
+	items := make([]listItem, 0)
+	var candidates []storage.Task
+	switch {
+	case m.currentTopic == "RecentlyAdded":
+		candidates = m.recentlyAdded(m.recentLimit)
+	case m.currentTopic == "RecentlyDone":
+		candidates = m.recentlyDone(m.recentLimit)
+	case m.currentTopic != "":
+		for _, t := range m.tasks {
+			if t.Project == m.currentTopic {
+				candidates = append(candidates, t)
+			}
+		}
+	default:
+		candidates = m.tasks
+	}
+	for _, t := range candidates {
+		if taskMatchesQuery(t, q) {
+			items = append(items, listItem{kind: itemTask, task: t, topic: t.Project})
+		}
+	}
+	return items
+}
+
+func (m Model) searchActive() bool {
+	return strings.TrimSpace(m.searchQuery) != ""
+}
+
+func taskMatchesQuery(t storage.Task, query string) bool {
+	fields := []string{t.Title, t.Project, t.Tags}
+	if t.Due.Valid {
+		fields = append(fields, t.Due.Time.Format("2006-01-02"))
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), query) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) topicCounts() map[string]int {

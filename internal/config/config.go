@@ -34,6 +34,7 @@ type Keymap struct {
 	SortPriority  string `toml:"sort_priority"`
 	SortCreated   string `toml:"sort_created"`
 	DeleteAllDone string `toml:"delete_all_done"`
+	Search        string `toml:"search"`
 }
 
 type Config struct {
@@ -102,6 +103,7 @@ func defaultConfig() Config {
 			SortPriority:  "sp",
 			SortCreated:   "st",
 			DeleteAllDone: "D",
+			Search:        "/",
 		},
 	}
 }

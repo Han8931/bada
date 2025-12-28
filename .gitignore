@@ -6,6 +6,7 @@
 *.dylib
 *.test
 trash/*
+.cache/*
 
 # Go build
 *.out
