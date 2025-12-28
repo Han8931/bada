@@ -214,6 +214,23 @@ func (s *Store) RenameTopic(oldName, newName string) (int64, error) {
 	return res.RowsAffected()
 }
 
+func (s *Store) DeleteTopic(topic string) (int64, error) {
+	tasks, err := s.fetchTasksByTopic(topic)
+	if err != nil {
+		return 0, err
+	}
+	if len(tasks) > 0 {
+		if err := s.moveToTrash(tasks); err != nil {
+			return 0, err
+		}
+	}
+	res, err := s.db.Exec(`DELETE FROM tasks WHERE project = ?;`, topic)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) UpdateTitle(id int, title string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET title = ? WHERE id = ?;`, title, id)
 	return err
@@ -238,10 +255,7 @@ func (s *Store) ShiftDue(id int, days int) error {
 	}
 	var base time.Time
 	if current.Valid {
-		base, err = time.Parse(time.RFC3339, current.String)
-		if err != nil {
-			base = time.Now().UTC()
-		}
+		base = parseTimeWithFallback(current.String)
 	} else {
 		base = time.Now().UTC()
 	}
@@ -376,6 +390,27 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 	return tasks, nil
 }
 
+func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
+	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks WHERE project = ? ORDER BY id;`, topic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 func (s *Store) moveToTrash(tasks []Task) error {
 	if len(tasks) == 0 {
 		return nil
@@ -424,12 +459,14 @@ func scanTask(scanner rowScanner) (Task, error) {
 	}
 	t.RecurrenceInterval = interval
 	if dueStr.Valid {
-		if parsed, err := time.Parse(time.RFC3339, dueStr.String); err == nil {
+		parsed := parseTimeWithFallback(dueStr.String)
+		if !parsed.IsZero() {
 			t.Due = sql.NullTime{Time: parsed, Valid: true}
 		}
 	}
 	if startStr.Valid {
-		if parsed, err := time.Parse(time.RFC3339, startStr.String); err == nil {
+		parsed := parseTimeWithFallback(startStr.String)
+		if !parsed.IsZero() {
 			t.Start = sql.NullTime{Time: parsed, Valid: true}
 		}
 	}
@@ -471,6 +508,19 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func parseTimeWithFallback(val string) time.Time {
+	if val == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, val); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02", val); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 func sqliteDSN(path string) string {

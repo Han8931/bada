@@ -56,6 +56,8 @@ type Model struct {
 	currentTopic  string
 	confirmDel    bool
 	pendingDel    *storage.Task
+	confirmTopic  bool
+	pendingTopic  string
 	trashSelected map[int]bool
 	trashConfirm  bool
 	trashPending  []storage.TrashEntry
@@ -106,6 +108,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
+		}
+		if m.confirmTopic {
+			return m.updateDeleteTopicConfirm(msg.String())
 		}
 		if m.mode == modeTrash {
 			return m.updateTrashMode(msg.String(), msg)
@@ -228,6 +233,15 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 	case m.cfg.Keys.Delete:
 		task, ok := m.currentTask()
 		if !ok {
+			vis := m.visibleItems()
+			if len(vis) > 0 && m.cursor < len(vis) {
+				it := vis[m.cursor]
+				if it.kind == itemTopic && m.currentTopic == "" {
+					m.confirmTopic = true
+					m.pendingTopic = it.topic
+					m.status = fmt.Sprintf("Delete topic \"%s\" and its tasks? y/n", it.topic)
+				}
+			}
 			return m, nil
 		}
 		m.confirmDel = true
@@ -429,6 +443,43 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) updateDeleteTopicConfirm(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "n", "N", "esc":
+		m.status = "Topic delete cancelled"
+		m.confirmTopic = false
+		m.pendingTopic = ""
+		return m, nil
+	case "y", "Y":
+		if m.pendingTopic == "" {
+			m.status = "No topic selected"
+			m.confirmTopic = false
+			return m, nil
+		}
+		n, err := m.store.DeleteTopic(m.pendingTopic)
+		if err != nil {
+			m.status = fmt.Sprintf("delete topic failed: %v", err)
+			m.confirmTopic = false
+			m.pendingTopic = ""
+			return m, nil
+		}
+		var errReload error
+		m.tasks, errReload = m.store.FetchTasks()
+		if errReload == nil {
+			m.sortTasks()
+			m.cursor = clampCursor(0, len(m.visibleItems()))
+			m.status = fmt.Sprintf("Deleted topic \"%s\" (%d tasks)", m.pendingTopic, n)
+		} else {
+			m.status = fmt.Sprintf("reload failed: %v", errReload)
+		}
+		m.confirmTopic = false
+		m.pendingTopic = ""
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
 func (m Model) enterTrashView() (tea.Model, tea.Cmd) {
 	entries, err := m.store.ListTrash()
 	if err != nil {
@@ -601,8 +652,8 @@ func renderHelp(k config.Keymap) string {
 
 func (m Model) renderTaskList() string {
 	var b strings.Builder
-	b.WriteString("   C  P Title                                   Due        Topic\n")
-	b.WriteString("   --- --- ---------------------------------------- ---------- ----------------\n")
+	b.WriteString("   C State    Title                                   Due        Topic\n")
+	b.WriteString("   --- ------- ---------------------------------------- ---------- ----------------\n")
 	items := m.visibleItems()
 	for i, it := range items {
 		cursor := " "
@@ -622,11 +673,12 @@ func (m Model) renderTaskList() string {
 			if len(title) > 40 {
 				title = title[:40]
 			}
+			state := humanDone(it.task.Done)
 			due := displayDate(it.task.Due)
 			if due == "" {
 				due = "pending"
 			}
-			body := fmt.Sprintf("%s %s %-40s %-10s %-10s", cursor, checkbox, title, due, it.task.Project)
+			body := fmt.Sprintf("%s %s %-7s %-40s %-10s %-10s", cursor, checkbox, state, title, due, it.task.Project)
 			if badge := overdueBadge(it.task); badge != "" {
 				body += " " + badge
 			}
@@ -689,14 +741,18 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		if m.meta == nil {
 			return m, nil
 		}
-		// Keep current field value, then save what we have so far.
 		m.meta.setCurrentValue(m.input.Value())
-		res, cmd := m.saveMetadata()
-		if mm, ok := res.(Model); ok {
-			mm.status = "Metadata saved"
-			return mm, cmd
+		var err error
+		m, err = m.applyMetadataAndReload()
+		if err != nil {
+			m.status = fmt.Sprintf("save failed: %v", err)
+			return m, nil
 		}
-		return res, cmd
+		m.meta = nil
+		m.mode = modeList
+		m.input.Blur()
+		m.status = "Metadata saved"
+		return m, nil
 	case "tab", "right", "down":
 		if m.meta == nil {
 			return m, nil
@@ -722,8 +778,18 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 		m.meta.setCurrentValue(m.input.Value())
+		var err error
+		m, err = m.applyMetadataAndReload()
+		if err != nil {
+			m.status = fmt.Sprintf("save failed: %v", err)
+			return m, nil
+		}
 		if m.meta.index >= len(metaFields())-1 {
-			return m.saveMetadata()
+			m.meta = nil
+			m.mode = modeList
+			m.input.Blur()
+			m.status = "Metadata saved"
+			return m, nil
 		}
 		m.meta.index++
 		m.input.SetValue(m.meta.currentValue())
@@ -751,71 +817,6 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		}
 		return m, cmd
 	}
-}
-
-func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
-	if m.meta == nil {
-		return m, nil
-	}
-	taskID := m.meta.taskID
-	title := strings.TrimSpace(m.meta.title)
-	if title == "" {
-		m.status = "title cannot be empty"
-		return m, nil
-	}
-	priority, err := parsePriority(m.meta.priority)
-	if err != nil {
-		m.status = fmt.Sprintf("priority invalid: %v", err)
-		return m, nil
-	}
-	due, err := parseDate(m.meta.due)
-	if err != nil {
-		m.status = fmt.Sprintf("due date invalid: %v", err)
-		return m, nil
-	}
-	start, err := parseDate(m.meta.start)
-	if err != nil {
-		m.status = fmt.Sprintf("start date invalid: %v", err)
-		return m, nil
-	}
-	recurring := parseYN(m.meta.recurring)
-	rule := strings.TrimSpace(strings.ToLower(m.meta.rule))
-	if rule == "" {
-		rule = "none"
-	}
-	interval := parseInterval(m.meta.interval)
-
-	err = m.store.UpdateTaskMetadata(m.meta.taskID, m.meta.project, m.meta.tags, priority, due, start, recurring)
-	if err != nil {
-		m.status = fmt.Sprintf("save failed: %v", err)
-		return m, nil
-	}
-	if err := m.store.UpdateRecurrence(m.meta.taskID, rule, interval); err != nil {
-		m.status = fmt.Sprintf("recurrence save failed: %v", err)
-		return m, nil
-	}
-	if err := m.store.UpdateTitle(m.meta.taskID, title); err != nil {
-		m.status = fmt.Sprintf("title save failed: %v", err)
-		return m, nil
-	}
-	m.meta = nil
-	m.mode = modeList
-	m.input.Blur()
-
-	m.tasks, err = m.store.FetchTasks()
-	if err == nil {
-		m.sortTasks()
-		for i, t := range m.tasks {
-			if t.ID == taskID {
-				m.cursor = clampCursor(i, len(m.tasks))
-				break
-			}
-		}
-		m.status = "Metadata saved"
-	} else {
-		m.status = fmt.Sprintf("reload failed: %v", err)
-	}
-	return m, nil
 }
 
 func metaFields() []string {
@@ -882,6 +883,63 @@ func (m Model) metaPrompt() string {
 		m.meta.currentLabel(), m.meta.index+1, len(metaFields()))
 }
 
+func (m Model) applyMetadataAndReload() (Model, error) {
+	if m.meta == nil {
+		return m, nil
+	}
+	taskID := m.meta.taskID
+	title := strings.TrimSpace(m.meta.title)
+	if title == "" {
+		m.status = "title cannot be empty"
+		return m, nil
+	}
+	priority, err := parsePriority(m.meta.priority)
+	if err != nil {
+		m.status = fmt.Sprintf("priority invalid: %v", err)
+		return m, nil
+	}
+	due, err := parseDate(m.meta.due)
+	if err != nil {
+		m.status = fmt.Sprintf("due date invalid: %v", err)
+		return m, nil
+	}
+	start, err := parseDate(m.meta.start)
+	if err != nil {
+		m.status = fmt.Sprintf("start date invalid: %v", err)
+		return m, nil
+	}
+	recurring := parseYN(m.meta.recurring)
+	rule := strings.TrimSpace(strings.ToLower(m.meta.rule))
+	if rule == "" {
+		rule = "none"
+	}
+	interval := parseInterval(m.meta.interval)
+
+	if err := m.store.UpdateTaskMetadata(taskID, m.meta.project, m.meta.tags, priority, due, start, recurring); err != nil {
+		return m, err
+	}
+	if err := m.store.UpdateRecurrence(taskID, rule, interval); err != nil {
+		return m, err
+	}
+	if err := m.store.UpdateTitle(taskID, title); err != nil {
+		return m, err
+	}
+
+	tasks, err := m.store.FetchTasks()
+	if err != nil {
+		return m, err
+	}
+	m.tasks = tasks
+	m.sortTasks()
+	for i, t := range m.tasks {
+		if t.ID == taskID {
+			m.cursor = clampCursor(i, len(m.tasks))
+			break
+		}
+	}
+	return m, nil
+}
+
 func parsePriority(v string) (int, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -923,7 +981,7 @@ func displayDate(t sql.NullTime) string {
 	if t.Valid {
 		return formatDate(t)
 	}
-	return ""
+	return "Unknown"
 }
 
 func defaultStart(t storage.Task) string {
@@ -1002,13 +1060,16 @@ func (m Model) renderMetadataPanel() string {
 	var b strings.Builder
 	b.WriteString("Metadata\n")
 	b.WriteString(fmt.Sprintf("Title     : %s\n", task.Title))
-	b.WriteString(fmt.Sprintf("Done      : %s\n", humanDone(task.Done)))
-	b.WriteString(fmt.Sprintf("Topic     : %s\n", emptyPlaceholder(task.Project)))
 	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(task.Tags)))
 	b.WriteString(fmt.Sprintf("Priority  : %d\n", task.Priority))
-	b.WriteString(fmt.Sprintf("Due       : %s%s\n", displayDate(task.Due), overdueDetail(task)))
 	b.WriteString(fmt.Sprintf("Start     : %s\n", defaultStart(task)))
 	b.WriteString(fmt.Sprintf("Recurring : %t\n", task.Recurring))
+	if task.RecurrenceRule != "" && task.RecurrenceRule != "none" {
+		b.WriteString(fmt.Sprintf("Rule      : %s\n", task.RecurrenceRule))
+	}
+	if task.RecurrenceInterval > 0 {
+		b.WriteString(fmt.Sprintf("Interval  : %d\n", task.RecurrenceInterval))
+	}
 	return b.String()
 }
 
