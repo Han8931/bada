@@ -13,16 +13,18 @@ import (
 )
 
 type Task struct {
-	ID        int
-	Title     string
-	Done      bool
-	Project   string
-	Tags      string
-	Due       sql.NullTime
-	Start     sql.NullTime
-	Priority  int
-	Recurring bool
-	CreatedAt time.Time
+	ID                 int
+	Title              string
+	Done               bool
+	Project            string
+	Tags               string
+	Due                sql.NullTime
+	Start              sql.NullTime
+	Priority           int
+	Recurring          bool
+	RecurrenceRule     string
+	RecurrenceInterval int
+	CreatedAt          time.Time
 }
 
 type Store struct {
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 	start_at TEXT DEFAULT NULL,
 	priority INTEGER NOT NULL DEFAULT 0,
 	recurring INTEGER NOT NULL DEFAULT 0,
+	recurrence_rule TEXT DEFAULT '',
+	recurrence_interval INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL
 );`
 	if _, err := s.db.Exec(ddl); err != nil {
@@ -80,9 +84,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 func (s *Store) ensureTaskColumns() error {
 	required := map[string]string{
-		"start_at":  "ALTER TABLE tasks ADD COLUMN start_at TEXT DEFAULT NULL;",
-		"priority":  "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
-		"recurring": "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
+		"start_at":            "ALTER TABLE tasks ADD COLUMN start_at TEXT DEFAULT NULL;",
+		"priority":            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
+		"recurring":           "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
+		"recurrence_rule":     "ALTER TABLE tasks ADD COLUMN recurrence_rule TEXT DEFAULT '';",
+		"recurrence_interval": "ALTER TABLE tasks ADD COLUMN recurrence_interval INTEGER NOT NULL DEFAULT 0;",
 	}
 	existing := map[string]struct{}{}
 	rows, err := s.db.Query(`PRAGMA table_info(tasks);`)
@@ -112,7 +118,7 @@ func (s *Store) ensureTaskColumns() error {
 }
 
 func (s *Store) FetchTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, created_at FROM tasks ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -122,15 +128,21 @@ func (s *Store) FetchTasks() ([]Task, error) {
 	for rows.Next() {
 		var t Task
 		var doneInt, priority, recurring int
+		var rule sql.NullString
+		var interval int
 		var dueStr, startStr sql.NullString
 		var createdStr string
 
-		if err := rows.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &createdStr); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &createdStr); err != nil {
 			return nil, err
 		}
 		t.Done = doneInt == 1
 		t.Priority = priority
 		t.Recurring = recurring == 1
+		if rule.Valid {
+			t.RecurrenceRule = rule.String
+		}
+		t.RecurrenceInterval = interval
 		if dueStr.Valid {
 			if parsed, err := time.Parse(time.RFC3339, dueStr.String); err == nil {
 				t.Due = sql.NullTime{Time: parsed, Valid: true}
@@ -240,6 +252,11 @@ func (s *Store) UpdateTaskMetadata(id int, project, tags string, priority int, d
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET project = ?, tags = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
 		project, tags, priority, dueStr, startStr, rec, id)
+	return err
+}
+
+func (s *Store) UpdateRecurrence(id int, rule string, interval int) error {
+	_, err := s.db.Exec(`UPDATE tasks SET recurrence_rule = ?, recurrence_interval = ? WHERE id = ?;`, rule, interval, id)
 	return err
 }
 

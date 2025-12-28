@@ -34,6 +34,8 @@ type metaState struct {
 	due       string
 	start     string
 	recurring string
+	rule      string
+	interval  string
 	index     int
 }
 
@@ -275,13 +277,16 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			info += fmt.Sprintf(" • priority:%d", task.Priority)
 		}
 		if task.Due.Valid {
-			info += " • due:" + task.Due.Time.Format("2006-01-02")
+			info += " • due:" + task.Due.Time.Format("2006-01-02") + overdueDetail(task)
 		}
 		if task.Start.Valid {
 			info += " • start:" + task.Start.Time.Format("2006-01-02")
 		}
-		if task.Recurring {
-			info += " • recurring"
+		if task.RecurrenceRule != "" && task.RecurrenceRule != "none" {
+			info += fmt.Sprintf(" • recur:%s", task.RecurrenceRule)
+			if task.RecurrenceInterval > 0 {
+				info += fmt.Sprintf("(%dd)", task.RecurrenceInterval)
+			}
 		}
 		m.status = info
 	case m.cfg.Keys.Edit:
@@ -321,7 +326,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var b strings.Builder
 
-	b.WriteString("Todo (Bubble Tea + SQLite)")
+	b.WriteString("bada (Bubble Tea + SQLite)")
 	b.WriteString("\n\n")
 
 	b.WriteString(m.renderTaskList())
@@ -431,6 +436,9 @@ func (m Model) renderTaskList() string {
 				checkbox = "[x]"
 			}
 			body := fmt.Sprintf("%s %s %s", cursor, checkbox, it.task.Title)
+			if overdueBadge(it.task) != "" {
+				body += " " + overdueBadge(it.task)
+			}
 			b.WriteString(body)
 			b.WriteString("\n")
 		}
@@ -446,7 +454,7 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 		tags:      t.Tags,
 		priority:  fmt.Sprintf("%d", t.Priority),
 		due:       formatDate(t.Due),
-		start:     formatDate(t.Start),
+		start:     defaultStart(t),
 		recurring: boolToYN(t.Recurring),
 		index:     0,
 	}
@@ -515,7 +523,12 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 				m.input.SetValue(filterDigits(m.input.Value()))
 			case 4, 5: // dates
 				m.input.SetValue(filterDate(m.input.Value()))
-			case 6: // recurring
+			case 6: // recurrence rule
+				// allow only letters/dots
+				m.input.SetValue(filterRule(m.input.Value()))
+			case 7: // interval
+				m.input.SetValue(filterDigits(m.input.Value()))
+			case 8: // recurring flag
 				m.input.SetValue(filterYN(m.input.Value()))
 			}
 		}
@@ -549,10 +562,19 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	recurring := parseYN(m.meta.recurring)
+	rule := strings.TrimSpace(strings.ToLower(m.meta.rule))
+	if rule == "" {
+		rule = "none"
+	}
+	interval := parseInterval(m.meta.interval)
 
 	err = m.store.UpdateTaskMetadata(m.meta.taskID, m.meta.project, m.meta.tags, priority, due, start, recurring)
 	if err != nil {
 		m.status = fmt.Sprintf("save failed: %v", err)
+		return m, nil
+	}
+	if err := m.store.UpdateRecurrence(m.meta.taskID, rule, interval); err != nil {
+		m.status = fmt.Sprintf("recurrence save failed: %v", err)
 		return m, nil
 	}
 	if err := m.store.UpdateTitle(m.meta.taskID, title); err != nil {
@@ -580,7 +602,7 @@ func (m Model) saveMetadata() (tea.Model, tea.Cmd) {
 }
 
 func metaFields() []string {
-	return []string{"title", "topic", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurring (y/n)"}
+	return []string{"title", "topic", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurrence", "interval", "recurring (y/n)"}
 }
 
 func (ms metaState) currentLabel() string {
@@ -602,6 +624,10 @@ func (ms metaState) currentValue() string {
 	case 5:
 		return ms.start
 	case 6:
+		return ms.rule
+	case 7:
+		return ms.interval
+	case 8:
 		return ms.recurring
 	default:
 		return ""
@@ -623,6 +649,10 @@ func (ms *metaState) setCurrentValue(v string) {
 	case 5:
 		ms.start = v
 	case 6:
+		ms.rule = v
+	case 7:
+		ms.interval = v
+	case 8:
 		ms.recurring = v
 	}
 }
@@ -672,6 +702,20 @@ func formatDate(t sql.NullTime) string {
 	return t.Time.Format("2006-01-02")
 }
 
+func displayDate(t sql.NullTime) string {
+	if t.Valid {
+		return formatDate(t)
+	}
+	return ""
+}
+
+func defaultStart(t storage.Task) string {
+	if t.Start.Valid {
+		return formatDate(t.Start)
+	}
+	return formatDate(sql.NullTime{Time: t.CreatedAt, Valid: true})
+}
+
 func parseYN(v string) bool {
 	v = strings.ToLower(strings.TrimSpace(v))
 	return v == "y" || v == "yes" || v == "true" || v == "1"
@@ -703,6 +747,8 @@ func (m Model) renderMetaBox() string {
 		m.meta.priority,
 		m.meta.due,
 		m.meta.start,
+		m.meta.rule,
+		m.meta.interval,
 		m.meta.recurring,
 	}
 	var b strings.Builder
@@ -743,8 +789,8 @@ func (m Model) renderMetadataPanel() string {
 	b.WriteString(fmt.Sprintf("Topic     : %s\n", emptyPlaceholder(task.Project)))
 	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(task.Tags)))
 	b.WriteString(fmt.Sprintf("Priority  : %d\n", task.Priority))
-	b.WriteString(fmt.Sprintf("Due       : %s\n", formatDate(task.Due)))
-	b.WriteString(fmt.Sprintf("Start     : %s\n", formatDate(task.Start)))
+	b.WriteString(fmt.Sprintf("Due       : %s%s\n", displayDate(task.Due), overdueDetail(task)))
+	b.WriteString(fmt.Sprintf("Start     : %s\n", defaultStart(task)))
 	b.WriteString(fmt.Sprintf("Recurring : %t\n", task.Recurring))
 	return b.String()
 }
@@ -763,7 +809,7 @@ func (m Model) renderStatusBar() string {
 	if total > 0 {
 		cursor = m.cursor + 1
 	}
-	return fmt.Sprintf("[%s] sort:%s  %d/%d  %s", modeLabel, m.sortMode, cursor, total, m.status)
+	return fmt.Sprintf("[bada] [%s] sort:%s  %d/%d  %s", modeLabel, m.sortMode, cursor, total, m.status)
 }
 
 func (m Model) modeLabel() string {
@@ -1015,6 +1061,32 @@ func clampCursor(cur, n int) int {
 	return cur
 }
 
+func overdueBadge(t storage.Task) string {
+	if !isOverdue(t) {
+		return ""
+	}
+	days := int(time.Since(t.Due.Time).Hours()/24) + 1
+	return fmt.Sprintf("[overdue %dd]", days)
+}
+
+func overdueDetail(t storage.Task) string {
+	if !isOverdue(t) {
+		return ""
+	}
+	days := int(time.Since(t.Due.Time).Hours()/24) + 1
+	return fmt.Sprintf(" (overdue %dd)", days)
+}
+
+func isOverdue(t storage.Task) bool {
+	if t.Done {
+		return false
+	}
+	if !t.Due.Valid {
+		return false
+	}
+	return time.Now().After(t.Due.Time)
+}
+
 func (m *Model) processSortKey(key string) bool {
 	// simple 2-key sequence: s + d/p/t (due/priority/created-time)
 	if key == "" {
@@ -1094,6 +1166,16 @@ func filterYN(v string) string {
 	return ""
 }
 
+func filterRule(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 type itemKind int
 
 const (
@@ -1105,6 +1187,21 @@ type listItem struct {
 	kind  itemKind
 	topic string
 	task  storage.Task
+}
+
+func parseInterval(v string) int {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	val, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	if val < 0 {
+		return 0
+	}
+	return val
 }
 
 func (m Model) visibleItems() []listItem {

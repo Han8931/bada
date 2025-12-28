@@ -24,10 +24,16 @@
 - Trash feature
 - Calendar view mode
 - Filtering & search: quick filters (all/active/done), project/tag filters, text search on title/tags.
-- Recurring templates: set recurrence rules (daily/weekly/weekday-only) with auto-generation when completed.
 - Reminders: flag overdue/soon-due tasks, optional notification hook (stdout or simple command hook).
 - Bulk actions: multi-select (mark done/delete/move project) using visual selection.
 - Import/export: plain text/CSV/TOML export; simple import to seed tasks.
 - Persistence niceties: backups/versioned snapshots of the SQLite DB, vacuum command.
 - Theming: light/dark presets, configurable border/separator characters in the split view.
 - UX polish: status bar with counts (total/active/done/overdue), help overlay (?), and a footer showing current filter/sort.
+
+## AI Features
+
+- Writing plain texts and parse them
+- Suggest a strategy to finish jobs quickly. 
+- Auto planning
+
