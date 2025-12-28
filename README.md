@@ -19,21 +19,50 @@
 - Sort: s then d/p/t.
 
 
-## Todo
+# Todo
 
-- Trash feature
-- Calendar view mode
-- Filtering & search: quick filters (all/active/done), project/tag filters, text search on title/tags.
-- Reminders: flag overdue/soon-due tasks, optional notification hook (stdout or simple command hook).
-- Bulk actions: multi-select (mark done/delete/move project) using visual selection.
-- Import/export: plain text/CSV/TOML export; simple import to seed tasks.
-- Persistence niceties: backups/versioned snapshots of the SQLite DB, vacuum command.
-- Theming: light/dark presets, configurable border/separator characters in the split view.
-- UX polish: status bar with counts (total/active/done/overdue), help overlay (?), and a footer showing current filter/sort.
+* **Lifecycle Management:** Full "Trash" functionality with auto-purge settings and a "Focus Mode" for the current task.
+* **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
+* **Advanced Filtering:** Boolean search (e.g., `project:work AND tag:urgent`), quick toggles for status, and saved filter views.
+* **System Integration:** Desktop notifications via `notify-send` or similar, and a background daemon for persistent reminders.
+* **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
+* **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
+* **Interface Customization:** Fully themeable TUI with support for 256-colors/TrueColor and configurable border styles.
 
 ## AI Features
 
-- Writing plain texts and parse them
-- Suggest a strategy to finish jobs quickly. 
-- Auto planning
+* **Natural Language Intake:** Convert "Buy milk tomorrow at 5pm" into a structured task with a due date and tags.
+* **Strategic Advisory:** AI analyzes your task list to suggest the most efficient order of operations (e.g., "Group these three errands together to save time").
+* **Automated Project Planning:** Generate a multi-step task breakdown from a single high-level goal (e.g., "Plan a 3-day hiking trip").
+
+
+This is a comprehensive and well-thought-out feature set. It strikes a great balance between a "power user" CLI/TUI application and modern AI-driven productivity.
+
+I have polished your existing list for clarity and professional terminology, then added a section of "Next-Level Ideas" to further differentiate your project.
+
+
+## New Ideas to Consider
+
+### 1. Workflow & Productivity
+
+* **Dependency Tracking:** Mark tasks as "blocked by" another task. The AI can then use this data to suggest a valid path forward.
+* **Recurring Logic:** Support for complex recurrences (e.g., "Every 3rd Tuesday" or "2 weeks after completion").
+* **Pomodoro Integration:** A built-in timer in the status bar that links directly to the active task for time-tracking.
+* **Git-style "Undo":** A command-line history (reflog) so you can revert accidental bulk deletions or project moves.
+
+### 2. Expanded AI Capabilities
+
+* **Complexity Estimation:** Let the AI estimate how many "Story Points" or minutes a task will take based on its title and description.
+* **Stale Task Detection:** An AI "nag" that identifies tasks that have been sitting idle for weeks and suggests either deleting them, breaking them down, or rescheduling.
+* **Contextual Tagging:** Automatically suggest tags based on the content of the task (e.g., recognizing "Email" and "Boss" and suggesting `@comm` or `@work`).
+
+### 3. Analytics & Reporting
+
+* **Velocity Tracking:** A simple dashboard showing tasks completed per day/week to help you understand your actual capacity.
+* **Workload Heatmap:** A visual representation (perhaps in the calendar view) showing which days are dangerously over-scheduled.
+
+### 4. Technical "Pro" Features
+
+* **Hook System:** Allow users to run scripts on certain events (e.g., `on_task_complete` triggers a script that updates a Slack status).
+* **Sync Backend:** Optional end-to-end encrypted sync between multiple machines using a simple central relay or Git-based syncing.
 

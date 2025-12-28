@@ -420,6 +420,8 @@ func renderHelp(k config.Keymap) string {
 
 func (m Model) renderTaskList() string {
 	var b strings.Builder
+	b.WriteString("   C  P Title                                   Due        Topic\n")
+	b.WriteString("   --- --- ---------------------------------------- ---------- ----------------\n")
 	items := m.visibleItems()
 	for i, it := range items {
 		cursor := " "
@@ -429,15 +431,23 @@ func (m Model) renderTaskList() string {
 		switch it.kind {
 		case itemTopic:
 			count := m.topicCounts()[it.topic]
-			b.WriteString(fmt.Sprintf("%s [topic] %s (%d)\n", cursor, it.topic, count))
+			b.WriteString(fmt.Sprintf("%s    [topic] %-40s (%d)\n", cursor, it.topic, count))
 		case itemTask:
 			checkbox := "[ ]"
 			if it.task.Done {
 				checkbox = "[x]"
 			}
-			body := fmt.Sprintf("%s %s %s", cursor, checkbox, it.task.Title)
-			if overdueBadge(it.task) != "" {
-				body += " " + overdueBadge(it.task)
+			title := it.task.Title
+			if len(title) > 40 {
+				title = title[:40]
+			}
+			due := displayDate(it.task.Due)
+			if due == "" {
+				due = "pending"
+			}
+			body := fmt.Sprintf("%s %s %-40s %-10s %-10s", cursor, checkbox, title, due, it.task.Project)
+			if badge := overdueBadge(it.task); badge != "" {
+				body += " " + badge
 			}
 			b.WriteString(body)
 			b.WriteString("\n")
