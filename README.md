@@ -31,7 +31,6 @@
 
 * Agenda reporting config (+7 or +3)
 * Note feature
-* Recently Added / Done
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
 * **Advanced Filtering:** Fuzzy / Boolean search (e.g., `project:work AND tag:urgent`), quick toggles for status, and saved filter views.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
