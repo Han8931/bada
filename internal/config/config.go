@@ -35,6 +35,7 @@ type Keymap struct {
 	SortCreated   string `toml:"sort_created"`
 	DeleteAllDone string `toml:"delete_all_done"`
 	Search        string `toml:"search"`
+	NoteView      string `toml:"note_view"`
 }
 
 type Config struct {
@@ -89,7 +90,7 @@ func defaultConfig() Config {
 			Down:          "j",
 			Toggle:        " ",
 			Delete:        "d",
-			Detail:        "enter",
+			Detail:        "v",
 			Confirm:       "enter",
 			Cancel:        "esc",
 			Edit:          "e",
@@ -104,6 +105,7 @@ func defaultConfig() Config {
 			SortCreated:   "st",
 			DeleteAllDone: "D",
 			Search:        "/",
+			NoteView:      "enter",
 		},
 	}
 }

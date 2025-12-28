@@ -13,12 +13,13 @@
 
 ## Daily Use
 
-- Rename: r (shows current/new), Enter saves, Esc cancels.
-- Priority: + / - (max 10).
-- Due shift: ] / [ (+1d/-1d).
-- Sort: s then d/p/t/a/s (due/priority/created/auto/state).
-- gg / G bindings (jump to top / bottom)
-- Search: / opens a query prompt; Enter applies, Esc cancels (submit empty to clear).
+- Rename: `r` (shows current/new), `Enter` saves, `Esc` cancels.
+- Priority: `+` / `-` (max 10).
+- Due shift: `]` / `[` (+1d/-1d).
+- Sort: `s` then `d/p/t/a/s` (due/priority/created/auto/state).
+- `gg` / `G` bindings (jump to top / bottom)
+- Search: `/` opens a query prompt; `Enter` applies, `Esc` cancels (submit empty to clear).
+- Notes: `Enter` to preview notes, `e` to edit notes inside the preview (works for tasks or topic rows; not available for RecentlyAdded/RecentlyDone).
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 
 ## Trash
@@ -31,7 +32,6 @@
 # Todo
 
 * Agenda reporting config (+7 or +3)
-* Note feature
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).

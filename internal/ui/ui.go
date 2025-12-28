@@ -2,7 +2,10 @@ package ui
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,8 +28,34 @@ const (
 	modeCommand
 	modeSearch
 	modeTrash
+	modeNote
 	modeReport
 )
+
+type noteKind int
+
+const (
+	noteTask noteKind = iota
+	noteTopic
+)
+
+type noteTarget struct {
+	kind   noteKind
+	taskID int
+	title  string
+	topic  string
+}
+
+type noteState struct {
+	target noteTarget
+	body   string
+}
+
+type noteEditedMsg struct {
+	target noteTarget
+	notes  string
+	err    error
+}
 
 type metaState struct {
 	taskID    int
@@ -69,6 +98,7 @@ type Model struct {
 	trashConfirm  bool
 	trashPending  []storage.TrashEntry
 	meta          *metaState
+	note          *noteState
 	renameID      int
 	renameTopic   string
 	renameIsTopic bool
@@ -114,12 +144,17 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case noteEditedMsg:
+		return m.handleNoteEdited(msg)
 	case tea.KeyMsg:
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
 		}
 		if m.confirmTopic {
 			return m.updateDeleteTopicConfirm(msg.String())
+		}
+		if m.mode == modeNote {
+			return m.updateNoteMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -318,6 +353,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.shiftDue(-1)
+	case m.cfg.Keys.NoteView:
+		return m.startNoteView()
 	case m.cfg.Keys.Detail:
 		task, ok := m.currentTask()
 		if !ok {
@@ -388,6 +425,13 @@ func (m Model) View() string {
 
 	b.WriteString("bada (Bubble Tea + SQLite)")
 	b.WriteString("\n\n")
+
+	if m.mode == modeNote {
+		b.WriteString(m.renderNoteView())
+		b.WriteString("\n\n")
+		b.WriteString(m.renderStatusBar())
+		return b.String()
+	}
 
 	if m.mode == modeReport {
 		b.WriteString("Reminder Report")
@@ -620,6 +664,20 @@ func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 	}
 }
 
+func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case m.cfg.Keys.Cancel, m.cfg.Keys.Confirm, "esc", m.cfg.Keys.Quit, "q", "enter":
+		m.mode = modeList
+		m.note = nil
+		m.status = "Notes closed"
+		return m, nil
+	case m.cfg.Keys.Edit:
+		return m.startNoteEditFromState()
+	default:
+		return m, nil
+	}
+}
+
 func (m Model) toggleTrashSelection(idx int) {
 	if m.trashSelected == nil {
 		m.trashSelected = map[int]bool{}
@@ -711,8 +769,8 @@ func (m Model) confirmPurgeTrash() (tea.Model, tea.Cmd) {
 }
 
 func renderHelp(k config.Keymap) string {
-	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
-		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Search, k.Quit)
+	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s notes • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
+		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.NoteView, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Search, k.Quit)
 }
 
 func (m Model) renderTaskList() string {
@@ -798,6 +856,175 @@ func (m Model) renderTrashList() string {
 		b.WriteString("(trash is empty)\n")
 	}
 	return b.String()
+}
+
+func (m Model) startNoteView() (tea.Model, tea.Cmd) {
+	target, notes, ok, err := m.noteTargetFromSelection()
+	if err != nil {
+		m.status = fmt.Sprintf("note load failed: %v", err)
+		return m, nil
+	}
+	if !ok {
+		m.status = "No task or topic selected"
+		return m, nil
+	}
+	m.note = &noteState{target: target, body: notes}
+	m.mode = modeNote
+	m.status = fmt.Sprintf("Notes: %s", target.label())
+	return m, nil
+}
+
+func (m Model) startNoteEditFromState() (tea.Model, tea.Cmd) {
+	if m.note == nil {
+		m.status = "No note loaded"
+		return m, nil
+	}
+	cmd, err := m.noteEditorCmd(m.note.target, m.note.body)
+	if err != nil {
+		m.status = fmt.Sprintf("note editor failed: %v", err)
+		return m, nil
+	}
+	m.status = fmt.Sprintf("Editing note: %s", m.note.target.label())
+	return m, cmd
+}
+
+func (m Model) noteTargetFromSelection() (noteTarget, string, bool, error) {
+	if task, ok := m.currentTask(); ok {
+		target := noteTarget{kind: noteTask, taskID: task.ID, title: task.Title}
+		return target, task.Notes, true, nil
+	}
+	if topic, ok := m.currentTopicItem(); ok {
+		if isSpecialTopic(topic) {
+			return noteTarget{}, "", false, errors.New("notes are not available for system topics")
+		}
+		notes, err := m.store.TopicNote(topic)
+		if err != nil {
+			return noteTarget{}, "", false, err
+		}
+		target := noteTarget{kind: noteTopic, topic: topic, title: topic}
+		return target, notes, true, nil
+	}
+	return noteTarget{}, "", false, nil
+}
+
+func (m Model) renderNoteView() string {
+	if m.note == nil {
+		return "No notes"
+	}
+	var b strings.Builder
+	b.WriteString("Notes: ")
+	b.WriteString(m.note.target.label())
+	b.WriteString("\n\n")
+	body := m.note.body
+	if strings.TrimSpace(body) == "" {
+		body = "(empty)"
+	}
+	b.WriteString(body)
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("Press %s/%s/enter to close, %s to edit",
+		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit))
+	return b.String()
+}
+
+func (m Model) noteEditorCmd(target noteTarget, notes string) (tea.Cmd, error) {
+	parts := resolveEditor()
+	if len(parts) == 0 {
+		return nil, errors.New("editor not set")
+	}
+	tmp, err := os.CreateTemp("", "bada-note-*.txt")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	if _, err := tmp.WriteString(notes); err != nil {
+		tmp.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	cmd := exec.Command(parts[0], append(parts[1:], path)...)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		data, readErr := os.ReadFile(path)
+		_ = os.Remove(path)
+		if err == nil && readErr != nil {
+			err = readErr
+		}
+		return noteEditedMsg{target: target, notes: string(data), err: err}
+	}), nil
+}
+
+func resolveEditor() []string {
+	if v := strings.TrimSpace(os.Getenv("VISUAL")); v != "" {
+		return strings.Fields(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("EDITOR")); v != "" {
+		return strings.Fields(v)
+	}
+	return []string{"vi"}
+}
+
+func (m Model) handleNoteEdited(msg noteEditedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.status = fmt.Sprintf("note edit failed: %v", msg.err)
+		return m, nil
+	}
+	switch msg.target.kind {
+	case noteTask:
+		if err := m.store.UpdateTaskNotes(msg.target.taskID, msg.notes); err != nil {
+			m.status = fmt.Sprintf("note save failed: %v", err)
+			return m, nil
+		}
+		m.applyTaskNoteLocal(msg.target.taskID, msg.notes)
+		m.status = fmt.Sprintf("Saved note: %s", msg.target.label())
+	case noteTopic:
+		if err := m.store.UpdateTopicNote(msg.target.topic, msg.notes); err != nil {
+			m.status = fmt.Sprintf("note save failed: %v", err)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Saved note: %s", msg.target.label())
+	}
+	if m.note != nil && m.note.target.matches(msg.target) {
+		m.note.body = msg.notes
+	}
+	return m, nil
+}
+
+func (m *Model) applyTaskNoteLocal(taskID int, notes string) {
+	idx := m.findTaskIndex(taskID)
+	if idx < 0 || idx >= len(m.tasks) {
+		return
+	}
+	m.tasks[idx].Notes = notes
+}
+
+func (t noteTarget) label() string {
+	switch t.kind {
+	case noteTask:
+		if t.title != "" {
+			return fmt.Sprintf("Task #%d %s", t.taskID, t.title)
+		}
+		return fmt.Sprintf("Task #%d", t.taskID)
+	case noteTopic:
+		if t.topic != "" {
+			return fmt.Sprintf("Topic %s", t.topic)
+		}
+		return "Topic"
+	default:
+		return "Notes"
+	}
+}
+
+func (t noteTarget) matches(other noteTarget) bool {
+	if t.kind != other.kind {
+		return false
+	}
+	if t.kind == noteTask {
+		return t.taskID == other.taskID
+	}
+	return t.topic == other.topic
 }
 
 func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
@@ -1315,6 +1542,16 @@ func (m Model) renderStatusBar() string {
 	if m.mode == modeReport {
 		return fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status)
 	}
+	if m.mode == modeNote {
+		target := ""
+		if m.note != nil {
+			target = m.note.target.label()
+		}
+		if target != "" {
+			return fmt.Sprintf("[bada] [%s] %s  %s", modeLabel, target, m.status)
+		}
+		return fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status)
+	}
 	if m.mode == modeTrash {
 		sel := m.selectedTrashCount()
 		total := len(m.trash)
@@ -1352,6 +1589,8 @@ func (m Model) modeLabel() string {
 		return "SEARCH"
 	case modeTrash:
 		return "TRASH"
+	case modeNote:
+		return "NOTE"
 	case modeReport:
 		return "REPORT"
 	default:
@@ -1389,7 +1628,7 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		cmdLower := strings.ToLower(cmd)
 		switch cmdLower {
 		case "help":
-			m.status = "Commands: help | sort (s then d/p/t) | rename (r) | priority +/- | due ]/["
+			m.status = "Commands: help | sort (s then d/p/t/a/s) | rename (r) | priority +/- | due ]/[ | notes (enter view, e edit)"
 		case "agenda":
 			return m.enterReportView()
 		default:
@@ -2073,6 +2312,21 @@ func (m Model) sortedTopics() []string {
 
 func isSpecialTopic(topic string) bool {
 	return topic == "RecentlyAdded" || topic == "RecentlyDone"
+}
+
+func (m Model) currentTopicItem() (string, bool) {
+	items := m.visibleItems()
+	if len(items) == 0 {
+		return "", false
+	}
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return "", false
+	}
+	it := items[m.cursor]
+	if it.kind != itemTopic {
+		return "", false
+	}
+	return it.topic, true
 }
 
 func (m Model) currentTask() (storage.Task, bool) {
