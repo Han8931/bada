@@ -51,6 +51,7 @@ type Model struct {
 	trashCursor   int
 	mode          mode
 	report        string
+	recentLimit   int
 	input         textinput.Model
 	status        string
 	filterDone    string
@@ -92,6 +93,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 		status:        "",
 		input:         ti,
 		mode:          modeReport,
+		recentLimit:   10,
 		filterDone:    strings.ToLower(cfg.DefaultFilter),
 		sortMode:      "auto",
 		currentTopic:  "",
@@ -248,7 +250,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			vis := m.visibleItems()
 			if len(vis) > 0 && m.cursor < len(vis) {
 				it := vis[m.cursor]
-				if it.kind == itemTopic && m.currentTopic == "" {
+				if it.kind == itemTopic && m.currentTopic == "" && !isSpecialTopic(it.topic) {
 					m.confirmTopic = true
 					m.pendingTopic = it.topic
 					m.status = fmt.Sprintf("Delete topic \"%s\" and its tasks? y/n", it.topic)
@@ -268,7 +270,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		if len(vis) == 0 {
 			return m, nil
 		}
-		if m.cursor < len(vis) && vis[m.cursor].kind == itemTopic && m.currentTopic == "" {
+		if m.cursor < len(vis) && vis[m.cursor].kind == itemTopic && m.currentTopic == "" && !isSpecialTopic(vis[m.cursor].topic) {
 			return m.startRenameTopic(vis[m.cursor].topic)
 		}
 		task, ok := m.currentTask()
@@ -708,8 +710,12 @@ func (m Model) renderTaskList() string {
 		}
 		switch it.kind {
 		case itemTopic:
-			count := m.topicCounts()[it.topic]
-			b.WriteString(fmt.Sprintf("%s    [topic] %-40s (%d)\n", cursor, it.topic, count))
+			if isSpecialTopic(it.topic) {
+				b.WriteString(fmt.Sprintf("%s    [topic] %-40s\n", cursor, it.topic))
+			} else {
+				count := m.topicCounts()[it.topic]
+				b.WriteString(fmt.Sprintf("%s    [topic] %-40s (%d)\n", cursor, it.topic, count))
+			}
 		case itemTask:
 			checkbox := "[ ]"
 			if it.task.Done {
@@ -721,12 +727,17 @@ func (m Model) renderTaskList() string {
 			}
 			state := humanDone(it.task.Done)
 			due := displayDate(it.task.Due)
+			badge := overdueBadge(it.task)
+			recBadge := recurrenceBadge(it.task)
 			if due == "" {
 				due = "pending"
 			}
 			body := fmt.Sprintf("%s %s %-7s %-40s %-10s", cursor, checkbox, state, title, due)
-			if badge := overdueBadge(it.task); badge != "" {
+			if badge != "" {
 				body += " " + badge
+			}
+			if recBadge != "" {
+				body += " " + recBadge
 			}
 			b.WriteString(body)
 			b.WriteString("\n")
@@ -771,6 +782,8 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 		due:       formatDate(t.Due),
 		start:     defaultStart(t),
 		recurring: boolToYN(t.Recurring),
+		rule:      t.RecurrenceRule,
+		interval:  intervalString(t.RecurrenceInterval),
 		index:     0,
 	}
 	m.input.SetValue(m.meta.currentValue())
@@ -1147,8 +1160,11 @@ func (m *Model) refreshReport() {
 	tomorrow := today.Add(24 * time.Hour)
 	soon := today.Add(72 * time.Hour)
 
-	var overdue, todayList, upcoming []storage.Task
+	var overdue, todayList, upcoming, recurring []storage.Task
 	for _, t := range m.tasks {
+		if isRecurringTask(t) && !t.Done {
+			recurring = append(recurring, t)
+		}
 		if t.Done || !t.Due.Valid {
 			continue
 		}
@@ -1189,7 +1205,45 @@ func (m *Model) refreshReport() {
 		if len(upcoming) > 0 {
 			writeSection("Upcoming (3d)", upcoming)
 		}
+		if len(recurring) > 0 {
+			writeRecurring := func(title string, tasks []storage.Task) {
+				b.WriteString(title)
+				b.WriteString(fmt.Sprintf(" (%d)\n", len(tasks)))
+				for _, t := range tasks {
+					due := "(no due)"
+					if t.Due.Valid {
+						due = fmt.Sprintf("due %s", formatDate(t.Due))
+					}
+					b.WriteString(fmt.Sprintf("  #%d %s [%s] %s\n", t.ID, t.Title, recurrenceRuleLabel(t), due))
+				}
+				b.WriteString("\n")
+			}
+			writeRecurring("Recurring Tasks", recurring)
+		}
 	}
+	recentAdd := m.recentlyAdded(m.recentLimit)
+	recentDone := m.recentlyDone(m.recentLimit)
+	b.WriteString("Recently Added\n")
+	if len(recentAdd) == 0 {
+		b.WriteString("  (none)\n")
+	} else {
+		for _, t := range recentAdd {
+			b.WriteString(fmt.Sprintf("  #%d %s (created %s)\n", t.ID, t.Title, t.CreatedAt.Format("2006-01-02")))
+		}
+	}
+	b.WriteString("\nRecently Done\n")
+	if len(recentDone) == 0 {
+		b.WriteString("  (none)\n")
+	} else {
+		for _, t := range recentDone {
+			when := "unknown"
+			if t.CompletedAt.Valid {
+				when = t.CompletedAt.Time.Format("2006-01-02")
+			}
+			b.WriteString(fmt.Sprintf("  #%d %s (done %s)\n", t.ID, t.Title, when))
+		}
+	}
+	b.WriteString("\n")
 	m.report = b.String()
 	m.status = "Reminder report"
 }
@@ -1406,7 +1460,10 @@ func (m Model) findTaskIndex(id int) int {
 }
 
 func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
-	t := m.tasks[m.cursor]
+	t, ok := m.currentTask()
+	if !ok {
+		return m, nil
+	}
 	newPrio := t.Priority + delta
 	if newPrio < 0 {
 		newPrio = 0
@@ -1421,15 +1478,16 @@ func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
 	if idx := m.findTaskIndex(t.ID); idx >= 0 && idx < len(m.tasks) {
 		m.tasks[idx].Priority = newPrio
 	}
-	// ensure current row shows updated priority immediately
-	m.tasks[m.cursor].Priority = newPrio
 	m.pendingSort = true
 	m.status = fmt.Sprintf("Priority set to %d", newPrio)
 	return m, nil
 }
 
 func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
-	t := m.tasks[m.cursor]
+	t, ok := m.currentTask()
+	if !ok {
+		return m, nil
+	}
 	if err := m.store.ShiftDue(t.ID, days); err != nil {
 		m.status = fmt.Sprintf("shift due failed: %v", err)
 		return m, nil
@@ -1553,6 +1611,33 @@ func overdueDetail(t storage.Task) string {
 	}
 	days := int(time.Since(t.Due.Time).Hours()/24) + 1
 	return fmt.Sprintf(" (overdue %dd)", days)
+}
+
+func recurrenceBadge(t storage.Task) string {
+	if !isRecurringTask(t) {
+		return ""
+	}
+	label := recurrenceRuleLabel(t)
+	if t.RecurrenceInterval > 0 {
+		return fmt.Sprintf("[recur %s/%dd]", label, t.RecurrenceInterval)
+	}
+	return fmt.Sprintf("[recur %s]", label)
+}
+
+func recurrenceRuleLabel(t storage.Task) string {
+	rule := strings.TrimSpace(t.RecurrenceRule)
+	if strings.ToLower(rule) == "none" {
+		rule = ""
+	}
+	if rule == "" {
+		return "recur"
+	}
+	return rule
+}
+
+func isRecurringTask(t storage.Task) bool {
+	rule := strings.ToLower(strings.TrimSpace(t.RecurrenceRule))
+	return t.Recurring || (rule != "" && rule != "none")
 }
 
 func isOverdue(t storage.Task) bool {
@@ -1713,6 +1798,58 @@ type listItem struct {
 	task  storage.Task
 }
 
+func (m Model) recentlyAdded(limit int) []storage.Task {
+	cp := append([]storage.Task{}, m.tasks...)
+	sort.SliceStable(cp, func(i, j int) bool {
+		return cp[i].CreatedAt.After(cp[j].CreatedAt)
+	})
+	if len(cp) > limit {
+		cp = cp[:limit]
+	}
+	return cp
+}
+
+func (m Model) recentlyDone(limit int) []storage.Task {
+	var done []storage.Task
+	for _, t := range m.tasks {
+		if t.Done {
+			done = append(done, t)
+		}
+	}
+	sort.SliceStable(done, func(i, j int) bool {
+		ai := done[i].CompletedAt
+		aj := done[j].CompletedAt
+		if ai.Valid && aj.Valid {
+			return ai.Time.After(aj.Time)
+		}
+		if ai.Valid {
+			return true
+		}
+		if aj.Valid {
+			return false
+		}
+		return done[i].ID > done[j].ID
+	})
+	if len(done) > limit {
+		done = done[:limit]
+	}
+	return done
+}
+
+func (m Model) countOverdue(list []storage.Task) int {
+	now := time.Now()
+	n := 0
+	for _, t := range list {
+		if t.Done || !t.Due.Valid {
+			continue
+		}
+		if now.After(t.Due.Time) {
+			n++
+		}
+	}
+	return n
+}
+
 func parseInterval(v string) int {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -1728,9 +1865,19 @@ func parseInterval(v string) int {
 	return val
 }
 
+func intervalString(v int) string {
+	if v <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", v)
+}
+
 func (m Model) visibleItems() []listItem {
 	items := make([]listItem, 0)
 	if m.currentTopic == "" {
+		for _, topic := range []string{"RecentlyAdded", "RecentlyDone"} {
+			items = append(items, listItem{kind: itemTopic, topic: topic})
+		}
 		for _, topic := range m.sortedTopics() {
 			items = append(items, listItem{kind: itemTopic, topic: topic})
 		}
@@ -1740,9 +1887,20 @@ func (m Model) visibleItems() []listItem {
 			}
 		}
 	} else {
-		for _, t := range m.tasks {
-			if t.Project == m.currentTopic {
+		switch m.currentTopic {
+		case "RecentlyAdded":
+			for _, t := range m.recentlyAdded(m.recentLimit) {
 				items = append(items, listItem{kind: itemTask, task: t})
+			}
+		case "RecentlyDone":
+			for _, t := range m.recentlyDone(m.recentLimit) {
+				items = append(items, listItem{kind: itemTask, task: t})
+			}
+		default:
+			for _, t := range m.tasks {
+				if t.Project == m.currentTopic {
+					items = append(items, listItem{kind: itemTask, task: t})
+				}
 			}
 		}
 	}
@@ -1751,13 +1909,20 @@ func (m Model) visibleItems() []listItem {
 
 func (m Model) topicCounts() map[string]int {
 	counts := make(map[string]int)
+	now := time.Now()
 	for _, t := range m.tasks {
+		if t.Done || !t.Due.Valid || !now.After(t.Due.Time) {
+			continue
+		}
 		topic := strings.TrimSpace(t.Project)
 		if topic == "" {
 			continue
 		}
 		counts[topic]++
 	}
+	// virtual topics (overdue only)
+	counts["RecentlyAdded"] = m.countOverdue(m.recentlyAdded(m.recentLimit))
+	counts["RecentlyDone"] = m.countOverdue(m.recentlyDone(m.recentLimit))
 	return counts
 }
 
@@ -1776,6 +1941,10 @@ func (m Model) sortedTopics() []string {
 	}
 	sort.Strings(topics)
 	return topics
+}
+
+func isSpecialTopic(topic string) bool {
+	return topic == "RecentlyAdded" || topic == "RecentlyDone"
 }
 
 func (m Model) currentTask() (storage.Task, bool) {

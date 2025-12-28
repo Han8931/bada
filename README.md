@@ -29,6 +29,7 @@
 
 # Todo
 
+* Agenda reporting config (+7 or +3)
 * Note feature
 * Recently Added / Done
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.

@@ -28,6 +28,7 @@ type Task struct {
 	RecurrenceRule     string
 	RecurrenceInterval int
 	CreatedAt          time.Time
+	CompletedAt        sql.NullTime
 }
 
 type Store struct {
@@ -113,6 +114,7 @@ func (s *Store) ensureTaskColumns() error {
 		"recurring":           "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
 		"recurrence_rule":     "ALTER TABLE tasks ADD COLUMN recurrence_rule TEXT DEFAULT '';",
 		"recurrence_interval": "ALTER TABLE tasks ADD COLUMN recurrence_interval INTEGER NOT NULL DEFAULT 0;",
+		"completed_at":        "ALTER TABLE tasks ADD COLUMN completed_at TEXT DEFAULT NULL;",
 	}
 	existing := map[string]struct{}{}
 	rows, err := s.db.Query(`PRAGMA table_info(tasks);`)
@@ -142,7 +144,7 @@ func (s *Store) ensureTaskColumns() error {
 }
 
 func (s *Store) FetchTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at, completed_at FROM tasks ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -170,10 +172,12 @@ func (s *Store) AddTask(title string) error {
 
 func (s *Store) SetDone(id int, done bool) error {
 	val := 0
+	completed := sql.NullString{}
 	if done {
 		val = 1
+		completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
 	}
-	_, err := s.db.Exec(`UPDATE tasks SET done = ? WHERE id = ?;`, val, id)
+	_, err := s.db.Exec(`UPDATE tasks SET done = ?, completed_at = ? WHERE id = ?;`, val, completed, id)
 	return err
 }
 
@@ -365,12 +369,12 @@ func (s *Store) PurgeTrash(entries []TrashEntry) error {
 }
 
 func (s *Store) fetchTaskByID(id int) (Task, error) {
-	row := s.db.QueryRow(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks WHERE id = ?;`, id)
+	row := s.db.QueryRow(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at, completed_at FROM tasks WHERE id = ?;`, id)
 	return scanTask(row)
 }
 
 func (s *Store) fetchDoneTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks WHERE done = 1 ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +395,7 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 }
 
 func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks WHERE project = ? ORDER BY id;`, topic)
+	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at, completed_at FROM tasks WHERE project = ? ORDER BY id;`, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -445,10 +449,10 @@ func scanTask(scanner rowScanner) (Task, error) {
 	var doneInt, priority, recurring int
 	var rule sql.NullString
 	var interval int
-	var dueStr, startStr sql.NullString
+	var dueStr, startStr, completedStr sql.NullString
 	var createdStr string
 
-	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &createdStr); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &createdStr, &completedStr); err != nil {
 		return Task{}, err
 	}
 	t.Done = doneInt == 1
@@ -472,6 +476,12 @@ func scanTask(scanner rowScanner) (Task, error) {
 	}
 	if created, err := time.Parse(time.RFC3339, createdStr); err == nil {
 		t.CreatedAt = created
+	}
+	if completedStr.Valid {
+		parsed := parseTimeWithFallback(completedStr.String)
+		if !parsed.IsZero() {
+			t.CompletedAt = sql.NullTime{Time: parsed, Valid: true}
+		}
 	}
 	return t, nil
 }
