@@ -46,6 +46,7 @@ type Model struct {
 	tasks         []storage.Task
 	trash         []storage.TrashEntry
 	cursor        int
+	navBuf        string
 	trashCursor   int
 	mode          mode
 	input         textinput.Model
@@ -141,6 +142,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeCommand {
 		return m.updateCommandMode(key, msg)
+	}
+	if m.processNavKey(key) {
+		return m, nil
 	}
 	if m.processSortKey(key) {
 		return m, nil
@@ -1408,6 +1412,36 @@ func (m *Model) processSortKey(key string) bool {
 	}
 	// reset buffer on other keys
 	m.sortBuf = ""
+	return false
+}
+
+func (m *Model) processNavKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	if key == "g" {
+		if m.navBuf == "g" {
+			m.cursor = 0
+			m.navBuf = ""
+			m.status = "Top"
+		} else {
+			m.navBuf = "g"
+			m.status = "g (press g for top)"
+		}
+		return true
+	}
+	if m.navBuf == "g" {
+		m.navBuf = ""
+	}
+	// capital G
+	if key == "G" {
+		items := m.visibleItems()
+		if len(items) > 0 {
+			m.cursor = len(items) - 1
+			m.status = "Bottom"
+		}
+		return true
+	}
 	return false
 }
 

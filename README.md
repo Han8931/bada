@@ -27,9 +27,10 @@
 
 # Todo
 
-* **Lifecycle Management:** Full "Trash" functionality with auto-purge settings and a "Focus Mode" for the current task.
+* Automatic sorting feature 
+* Recently Added / Done
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
-* **Advanced Filtering:** Boolean search (e.g., `project:work AND tag:urgent`), quick toggles for status, and saved filter views.
+* **Advanced Filtering:** Fuzzy / Boolean search (e.g., `project:work AND tag:urgent`), quick toggles for status, and saved filter views.
 * **System Integration:** Desktop notifications via `notify-send` or similar, and a background daemon for persistent reminders.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
