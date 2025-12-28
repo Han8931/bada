@@ -455,7 +455,17 @@ func (m Model) View() string {
 	}
 
 	if m.mode == modeReport {
-		b.WriteString(m.styles.Heading.Render("Reminder Report"))
+		b.WriteString(m.styles.Accent.Render(" ____    _    ____    _    "))
+		b.WriteString("\n")
+		b.WriteString(m.styles.Accent.Render("| __ )  / \\  |  _ \\  / \\   "))
+		b.WriteString("\n")
+		b.WriteString(m.styles.Accent.Render("|  _ \\ / _ \\ | | | / _ \\  "))
+		b.WriteString("\n")
+		b.WriteString(m.styles.Accent.Render("| |_) / ___ \\| |_| / ___ \\ "))
+		b.WriteString("\n")
+		b.WriteString(m.styles.Accent.Render("|____/_/   \\_\\____/_/   \\_\\"))
+		b.WriteString("\n\n")
+		b.WriteString(m.styles.Accent.Render("Reminder Report"))
 		b.WriteString("\n\n")
 		b.WriteString(m.report)
 	} else {
@@ -1545,63 +1555,88 @@ func (m *Model) refreshReport() {
 	}
 
 	var b strings.Builder
+	writeDivider := func() {
+		b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
+		b.WriteString("\n")
+	}
+	writeSectionHeader := func(title string, count int) {
+		line := fmt.Sprintf("%s (%d)", title, count)
+		b.WriteString(m.styles.Heading.Render(line))
+		b.WriteString("\n")
+	}
+	writeEmpty := func() {
+		b.WriteString(m.styles.Muted.Render("  (none)"))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(m.styles.Muted.Render(now.Format("Monday, Jan 2, 2006")))
+	b.WriteString("\n")
+	writeDivider()
+
 	if len(overdue) == 0 && len(todayList) == 0 && len(upcoming) == 0 {
-		b.WriteString("All clear. No due tasks.\n")
+		b.WriteString(m.styles.Success.Render("All clear. No due tasks.\n"))
 	} else {
-		writeSection := func(title string, tasks []storage.Task) {
-			b.WriteString(title)
-			b.WriteString(fmt.Sprintf(" (%d)\n", len(tasks)))
+		writeSection := func(title string, tasks []storage.Task, style lipgloss.Style) {
+			writeSectionHeader(title, len(tasks))
+			if len(tasks) == 0 {
+				writeEmpty()
+				b.WriteString("\n")
+				return
+			}
 			for _, t := range tasks {
 				due := formatDate(t.Due)
-				b.WriteString(fmt.Sprintf("  #%d %s (due %s)\n", t.ID, t.Title, due))
+				line := fmt.Sprintf("  • #%d %-40s  due %s", t.ID, truncateText(t.Title, 40), due)
+				b.WriteString(style.Render(line))
+				b.WriteString("\n")
 			}
 			b.WriteString("\n")
 		}
 		if len(overdue) > 0 {
-			writeSection("Overdue", overdue)
+			writeSection("Overdue", overdue, m.styles.Danger)
 		}
 		if len(todayList) > 0 {
-			writeSection("Due Today", todayList)
+			writeSection("Due Today", todayList, m.styles.Accent)
 		}
 		if len(upcoming) > 0 {
-			writeSection("Upcoming (3d)", upcoming)
+			writeSection("Upcoming (3d)", upcoming, m.styles.Muted)
 		}
 		if len(recurring) > 0 {
-			writeRecurring := func(title string, tasks []storage.Task) {
-				b.WriteString(title)
-				b.WriteString(fmt.Sprintf(" (%d)\n", len(tasks)))
-				for _, t := range tasks {
-					due := "(no due)"
-					if t.Due.Valid {
-						due = fmt.Sprintf("due %s", formatDate(t.Due))
-					}
-					b.WriteString(fmt.Sprintf("  #%d %s [%s] %s\n", t.ID, t.Title, recurrenceRuleLabel(t), due))
+			writeSectionHeader("Recurring Tasks", len(recurring))
+			for _, t := range recurring {
+				due := "no due"
+				if t.Due.Valid {
+					due = fmt.Sprintf("due %s", formatDate(t.Due))
 				}
+				line := fmt.Sprintf("  • #%d %-40s  [%s] %s", t.ID, truncateText(t.Title, 40), recurrenceRuleLabel(t), due)
+				b.WriteString(m.styles.Warning.Render(line))
 				b.WriteString("\n")
 			}
-			writeRecurring("Recurring Tasks", recurring)
+			b.WriteString("\n")
 		}
 	}
+	writeDivider()
+
 	recentAdd := m.recentlyAdded(m.recentLimit)
 	recentDone := m.recentlyDone(m.recentLimit)
-	b.WriteString("Recently Added\n")
+	writeSectionHeader("Recently Added", len(recentAdd))
 	if len(recentAdd) == 0 {
-		b.WriteString("  (none)\n")
+		writeEmpty()
 	} else {
 		for _, t := range recentAdd {
-			b.WriteString(fmt.Sprintf("  #%d %s (created %s)\n", t.ID, t.Title, t.CreatedAt.Format("2006-01-02")))
+			b.WriteString(fmt.Sprintf("  • #%d %-40s  created %s\n", t.ID, truncateText(t.Title, 40), t.CreatedAt.Format("2006-01-02")))
 		}
 	}
-	b.WriteString("\nRecently Done\n")
+	b.WriteString("\n")
+	writeSectionHeader("Recently Done", len(recentDone))
 	if len(recentDone) == 0 {
-		b.WriteString("  (none)\n")
+		writeEmpty()
 	} else {
 		for _, t := range recentDone {
 			when := "unknown"
 			if t.CompletedAt.Valid {
 				when = t.CompletedAt.Time.Format("2006-01-02")
 			}
-			b.WriteString(fmt.Sprintf("  #%d %s (done %s)\n", t.ID, t.Title, when))
+			b.WriteString(fmt.Sprintf("  • #%d %-40s  done %s\n", t.ID, truncateText(t.Title, 40), when))
 		}
 	}
 	b.WriteString("\n")
@@ -1639,6 +1674,19 @@ func (m Model) renderMetadataPanel() string {
 		b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Interval  : "), task.RecurrenceInterval))
 	}
 	return b.String()
+}
+
+func truncateText(text string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(text) <= max {
+		return text
+	}
+	if max <= 1 {
+		return text[:max]
+	}
+	return text[:max-1] + "…"
 }
 
 func emptyPlaceholder(v string) string {
