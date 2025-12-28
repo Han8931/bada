@@ -38,11 +38,29 @@ type Keymap struct {
 	NoteView      string `toml:"note_view"`
 }
 
+type Theme struct {
+	Title       string `toml:"title"`
+	Heading     string `toml:"heading"`
+	Accent      string `toml:"accent"`
+	Muted       string `toml:"muted"`
+	Success     string `toml:"success"`
+	Warning     string `toml:"warning"`
+	Danger      string `toml:"danger"`
+	Border      string `toml:"border"`
+	SelectionBg string `toml:"selection_bg"`
+	SelectionFg string `toml:"selection_fg"`
+	StatusBg    string `toml:"status_bg"`
+	StatusFg    string `toml:"status_fg"`
+	StatusAltBg string `toml:"status_alt_bg"`
+	StatusAltFg string `toml:"status_alt_fg"`
+}
+
 type Config struct {
 	DBPath        string `toml:"db_path"`
 	DefaultFilter string `toml:"default_filter"`
 	TrashDir      string `toml:"trash_dir"`
 	Keys          Keymap `toml:"keys"`
+	Theme         Theme  `toml:"theme"`
 }
 
 func LoadOrCreate(path string) (Config, error) {
@@ -106,6 +124,21 @@ func defaultConfig() Config {
 			DeleteAllDone: "D",
 			Search:        "/",
 			NoteView:      "enter",
+		},
+		Theme: Theme{
+			Title:       "#5B8DEF",
+			Heading:     "#62B6CB",
+			Accent:      "#F4A259",
+			Muted:       "#6B7280",
+			Success:     "#3CB371",
+			Warning:     "#E9C46A",
+			Danger:      "#E76F51",
+			Border:      "#94A3B8",
+			SelectionBg: "#FAD97A",
+			StatusBg:    "#E5E7EB",
+			StatusFg:    "#0B0F14",
+			StatusAltBg: "#CFE8FF",
+			StatusAltFg: "#0B0F14",
 		},
 	}
 }

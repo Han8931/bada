@@ -22,6 +22,10 @@
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview (works for tasks or topic rows; not available for RecentlyAdded/RecentlyDone).
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 
+## Theme
+
+Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to customize colors for headings, accents, status bar, and selection highlight.
+
 ## Trash
 
 - Deleted tasks are archived as JSON snapshots in `trash_dir` (default `trash/`).

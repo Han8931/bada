@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"bada/internal/config"
 	"bada/internal/storage"
@@ -57,6 +58,21 @@ type noteEditedMsg struct {
 	err    error
 }
 
+type uiStyles struct {
+	Title     lipgloss.Style
+	Heading   lipgloss.Style
+	Accent    lipgloss.Style
+	Muted     lipgloss.Style
+	Border    lipgloss.Style
+	Selection lipgloss.Style
+	Done      lipgloss.Style
+	Danger    lipgloss.Style
+	Warning   lipgloss.Style
+	Success   lipgloss.Style
+	Status    lipgloss.Style
+	StatusAlt lipgloss.Style
+}
+
 type metaState struct {
 	taskID    int
 	title     string
@@ -90,6 +106,9 @@ type Model struct {
 	pendingSort   bool
 	currentTopic  string
 	searchQuery   string
+	styles        uiStyles
+	width         int
+	height        int
 	confirmDel    bool
 	pendingDel    *storage.Task
 	confirmTopic  bool
@@ -129,6 +148,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 		filterDone:    strings.ToLower(cfg.DefaultFilter),
 		sortMode:      "auto",
 		currentTopic:  "",
+		styles:        buildStyles(cfg.Theme),
 	}
 	m.sortTasks()
 	m.refreshReport()
@@ -177,6 +197,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case tea.WindowSizeMsg:
 		m.input.Width = msg.Width - 10
+		m.width = msg.Width
+		m.height = msg.Height
 	}
 	return m, nil
 }
@@ -288,7 +310,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		if err == nil {
 			m.sortTasks()
 			vis = m.visibleItems()
-			m.cursor = clampCursor(m.cursor+1, len(vis))
+			m.cursor = clampCursor(m.cursor, len(vis))
 			m.status = "Toggled task"
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
@@ -423,62 +445,62 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var b strings.Builder
 
-	b.WriteString("bada (Bubble Tea + SQLite)")
+	b.WriteString(m.styles.Title.Render("bada (Bubble Tea + SQLite)"))
 	b.WriteString("\n\n")
 
 	if m.mode == modeNote {
 		b.WriteString(m.renderNoteView())
 		b.WriteString("\n\n")
-		b.WriteString(m.renderStatusBar())
-		return b.String()
+		return m.fillView(b.String())
 	}
 
 	if m.mode == modeReport {
-		b.WriteString("Reminder Report")
+		b.WriteString(m.styles.Heading.Render("Reminder Report"))
 		b.WriteString("\n\n")
 		b.WriteString(m.report)
 	} else {
 		b.WriteString(m.renderTaskList())
 	}
 
-	b.WriteString("\n---\n")
+	b.WriteString("\n")
+	b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
+	b.WriteString("\n")
 
 	if m.meta != nil {
-		b.WriteString("Metadata editor (tab/shift+tab or h/j/k/l to move, enter to save/next, esc to cancel)")
+		b.WriteString(m.styles.Heading.Render("Metadata editor (tab/shift+tab or h/j/k/l to move, enter to save/next, esc to cancel)"))
 		b.WriteString("\n\n")
 		b.WriteString(m.renderMetaBox())
 		b.WriteString("\n")
-		b.WriteString("Field: " + m.currentMetaLabel())
+		b.WriteString(m.styles.Muted.Render("Field: ") + m.styles.Accent.Render(m.currentMetaLabel()))
 		b.WriteString("\n")
 		b.WriteString(m.input.View())
 	} else if m.mode == modeReport {
-		b.WriteString("Press enter/esc/q to close, : for commands")
+		b.WriteString(m.styles.Muted.Render("Press enter/esc/q to close, : for commands"))
 	} else if m.mode == modeTrash {
-		b.WriteString("Trash (space to select, u to restore, esc to exit)")
+		b.WriteString(m.styles.Heading.Render("Trash (space to select, u to restore, esc to exit)"))
 		b.WriteString("\n\n")
 		b.WriteString(m.renderTrashList())
 	} else if m.mode == modeAdd {
-		b.WriteString("Add task: ")
+		b.WriteString(m.styles.Heading.Render("Add task: "))
 		b.WriteString(m.input.View())
 	} else if m.mode == modeRename {
-		b.WriteString("Rename task: Enter to save, Esc to cancel")
+		b.WriteString(m.styles.Heading.Render("Rename task: Enter to save, Esc to cancel"))
 		b.WriteString("\n\n")
-		b.WriteString(fmt.Sprintf("Current: %s\n", m.currentTaskTitle()))
-		b.WriteString("New: ")
+		b.WriteString(m.styles.Muted.Render("Current: ") + m.currentTaskTitle() + "\n")
+		b.WriteString(m.styles.Muted.Render("New: "))
 		b.WriteString(m.input.View())
 	} else if m.mode == modeCommand {
-		b.WriteString(":")
+		b.WriteString(m.styles.Heading.Render(":"))
 		b.WriteString(m.input.View())
 	} else if m.mode == modeSearch {
-		b.WriteString("Search: ")
+		b.WriteString(m.styles.Heading.Render("Search: "))
 		b.WriteString(m.input.View())
 	} else {
 		b.WriteString(m.renderMetadataPanel())
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(m.renderStatusBar())
-	return b.String()
+	return m.fillView(b.String())
 }
 
 func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
@@ -778,29 +800,39 @@ func (m Model) renderTaskList() string {
 
 	items := m.visibleItems()
 	if m.searchActive() {
-		b.WriteString(fmt.Sprintf("Search: %q (%d result(s))\n", m.searchQuery, len(items)))
+		b.WriteString(m.styles.Accent.Render(fmt.Sprintf("Search: %q (%d result(s))", m.searchQuery, len(items))))
+		b.WriteString("\n")
 	}
 
-	b.WriteString("   C State    Title                                   Due\n")
-	b.WriteString("   --- ------- ---------------------------------------- ----------\n")
+	header := "   S  Title                                   Due"
+	lineWidth := len(header)
+	if m.width > lineWidth {
+		lineWidth = m.width
+	}
+	b.WriteString(m.styles.Border.Render(header))
+	b.WriteString("\n")
+	b.WriteString(m.styles.Border.Render(m.ruleLine(lineWidth)))
+	b.WriteString("\n")
 	for i, it := range items {
-		cursor := " "
-		if m.cursor == i && m.mode == modeList {
-			cursor = ">"
-		}
 		switch it.kind {
 		case itemTopic:
+			line := ""
 			if isSpecialTopic(it.topic) {
-				b.WriteString(fmt.Sprintf("%s    [topic] %-40s\n", cursor, it.topic))
+				line = fmt.Sprintf("   %-2s %-40s", "📁", it.topic)
 			} else {
 				count := m.topicCounts()[it.topic]
-				b.WriteString(fmt.Sprintf("%s    [topic] %-40s (%d)\n", cursor, it.topic, count))
+				line = fmt.Sprintf("   %-2s %-40s (%d)", "📁", it.topic, count)
 			}
+			if m.cursor == i && m.mode == modeList {
+				line = m.styles.Selection.Render(line)
+			} else if isSpecialTopic(it.topic) {
+				line = m.styles.Heading.Render(line)
+			} else {
+				line = m.styles.Accent.Render(line)
+			}
+			b.WriteString(line)
+			b.WriteString("\n")
 		case itemTask:
-			checkbox := "[ ]"
-			if it.task.Done {
-				checkbox = "[x]"
-			}
 			title := it.task.Title
 			if len(title) > 40 {
 				title = title[:40]
@@ -812,35 +844,53 @@ func (m Model) renderTaskList() string {
 			if due == "" {
 				due = "pending"
 			}
-			body := fmt.Sprintf("%s %s %-7s %-40s %-10s", cursor, checkbox, state, title, due)
+			body := fmt.Sprintf("   %-2s %-40s %-10s", state, title, due)
 			if badge != "" {
-				body += " " + badge
+				if m.cursor == i && m.mode == modeList {
+					body += " " + badge
+				} else {
+					body += " " + m.styles.Danger.Render(badge)
+				}
 			}
 			if recBadge != "" {
-				body += " " + recBadge
+				if m.cursor == i && m.mode == modeList {
+					body += " " + recBadge
+				} else {
+					body += " " + m.styles.Warning.Render(recBadge)
+				}
 			}
 			if m.searchActive() && strings.TrimSpace(it.task.Project) != "" {
 				body += " [" + it.task.Project + "]"
+			}
+			if m.cursor == i && m.mode == modeList {
+				body = m.styles.Selection.Render(body)
+			} else if it.task.Done {
+				body = m.styles.Done.Render(body)
 			}
 			b.WriteString(body)
 			b.WriteString("\n")
 		}
 	}
 	if len(items) == 0 {
-		b.WriteString("(no tasks)\n")
+		b.WriteString(m.styles.Muted.Render("(no tasks)"))
+		b.WriteString("\n")
 	}
 	return b.String()
 }
 
 func (m Model) renderTrashList() string {
 	var b strings.Builder
-	b.WriteString("   Sel Deleted            Title                          Topic\n")
-	b.WriteString("   --- ------------------ ------------------------------ ----------------\n")
+	header := "   Sel Deleted            Title                          Topic"
+	lineWidth := len(header)
+	if m.width > lineWidth {
+		lineWidth = m.width
+	}
+	b.WriteString(m.styles.Border.Render(header))
+	b.WriteString("\n")
+	b.WriteString(m.styles.Border.Render(m.ruleLine(lineWidth)))
+	b.WriteString("\n")
 	for i, entry := range m.trash {
 		cursor := " "
-		if m.mode == modeTrash && m.trashCursor == i {
-			cursor = ">"
-		}
 		selected := "[ ]"
 		if m.trashSelected != nil && m.trashSelected[i] {
 			selected = "[*]"
@@ -850,10 +900,18 @@ func (m Model) renderTrashList() string {
 			title = title[:30]
 		}
 		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
-		b.WriteString(fmt.Sprintf("%s %s %-18s %-30s %-16s\n", cursor, selected, deleted, title, entry.Task.Project))
+		line := fmt.Sprintf("%s %s %-18s %-30s %-16s", cursor, selected, deleted, title, entry.Task.Project)
+		if m.mode == modeTrash && m.trashCursor == i {
+			line = m.styles.Selection.Render(line)
+		} else if m.trashSelected != nil && m.trashSelected[i] {
+			line = m.styles.Accent.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
 	}
 	if len(m.trash) == 0 {
-		b.WriteString("(trash is empty)\n")
+		b.WriteString(m.styles.Muted.Render("(trash is empty)"))
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -909,20 +967,20 @@ func (m Model) noteTargetFromSelection() (noteTarget, string, bool, error) {
 
 func (m Model) renderNoteView() string {
 	if m.note == nil {
-		return "No notes"
+		return m.styles.Muted.Render("No notes")
 	}
 	var b strings.Builder
-	b.WriteString("Notes: ")
-	b.WriteString(m.note.target.label())
+	b.WriteString(m.styles.Heading.Render("Notes: "))
+	b.WriteString(m.styles.Accent.Render(m.note.target.label()))
 	b.WriteString("\n\n")
 	body := m.note.body
 	if strings.TrimSpace(body) == "" {
-		body = "(empty)"
+		body = m.styles.Muted.Render("(empty)")
 	}
 	b.WriteString(body)
 	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("Press %s/%s/enter to close, %s to edit",
-		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit))
+	b.WriteString(m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit",
+		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit)))
 	return b.String()
 }
 
@@ -964,6 +1022,57 @@ func resolveEditor() []string {
 		return strings.Fields(v)
 	}
 	return []string{"vi"}
+}
+
+func buildStyles(theme config.Theme) uiStyles {
+	styles := uiStyles{
+		Title:     lipgloss.NewStyle().Bold(true),
+		Heading:   lipgloss.NewStyle().Bold(true),
+		Accent:    lipgloss.NewStyle().Bold(true),
+		Muted:     lipgloss.NewStyle(),
+		Border:    lipgloss.NewStyle(),
+		Selection: lipgloss.NewStyle().Bold(true),
+		Done:      lipgloss.NewStyle().Strikethrough(true),
+		Danger:    lipgloss.NewStyle().Bold(true),
+		Warning:   lipgloss.NewStyle(),
+		Success:   lipgloss.NewStyle(),
+		Status:    lipgloss.NewStyle(),
+		StatusAlt: lipgloss.NewStyle(),
+	}
+
+	styles.Title = applyFg(styles.Title, theme.Title)
+	styles.Heading = applyFg(styles.Heading, theme.Heading)
+	styles.Accent = applyFg(styles.Accent, theme.Accent)
+	styles.Muted = applyFg(styles.Muted, theme.Muted)
+	styles.Border = applyFg(styles.Border, theme.Border)
+	styles.Danger = applyFg(styles.Danger, theme.Danger)
+	styles.Warning = applyFg(styles.Warning, theme.Warning)
+	styles.Success = applyFg(styles.Success, theme.Success)
+	styles.Done = applyFg(styles.Done, theme.Muted)
+
+	styles.Selection = applyBg(styles.Selection, theme.SelectionBg)
+	styles.Selection = applyFg(styles.Selection, theme.SelectionFg)
+
+	styles.Status = applyBg(styles.Status, theme.StatusBg)
+	styles.Status = applyFg(styles.Status, theme.StatusFg)
+	styles.StatusAlt = applyBg(styles.StatusAlt, theme.StatusAltBg)
+	styles.StatusAlt = applyFg(styles.StatusAlt, theme.StatusAltFg)
+
+	return styles
+}
+
+func applyFg(style lipgloss.Style, color string) lipgloss.Style {
+	if strings.TrimSpace(color) == "" {
+		return style
+	}
+	return style.Foreground(lipgloss.Color(color))
+}
+
+func applyBg(style lipgloss.Style, color string) lipgloss.Style {
+	if strings.TrimSpace(color) == "" {
+		return style
+	}
+	return style.Background(lipgloss.Color(color))
 }
 
 func (m Model) handleNoteEdited(msg noteEditedMsg) (tea.Model, tea.Cmd) {
@@ -1392,14 +1501,16 @@ func (m Model) renderMetaBox() string {
 	var b strings.Builder
 	for i, name := range fields {
 		prefix := " "
-		if i == m.meta.index {
-			prefix = ">"
-		}
 		val := values[i]
 		if strings.TrimSpace(val) == "" {
 			val = "(empty)"
 		}
-		b.WriteString(fmt.Sprintf("%s %-18s : %s\n", prefix, name, val))
+		line := fmt.Sprintf("%s %-18s : %s", prefix, name, val)
+		if i == m.meta.index {
+			line = m.styles.Selection.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -1512,20 +1623,20 @@ func wrapIndex(idx, n int) int {
 func (m Model) renderMetadataPanel() string {
 	task, ok := m.currentTask()
 	if !ok {
-		return "No task selected"
+		return m.styles.Muted.Render("No task selected")
 	}
 	var b strings.Builder
-	b.WriteString("Metadata\n")
-	b.WriteString(fmt.Sprintf("Title     : %s\n", task.Title))
-	b.WriteString(fmt.Sprintf("Tags      : %s\n", emptyPlaceholder(task.Tags)))
-	b.WriteString(fmt.Sprintf("Priority  : %d\n", task.Priority))
-	b.WriteString(fmt.Sprintf("Start     : %s\n", defaultStart(task)))
-	b.WriteString(fmt.Sprintf("Recurring : %t\n", task.Recurring))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Title     : "), task.Title))
+	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Tags      : "), emptyPlaceholder(task.Tags)))
+	b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Priority  : "), task.Priority))
+	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Start     : "), defaultStart(task)))
+	b.WriteString(fmt.Sprintf("%s%t\n", m.styles.Muted.Render("Recurring : "), task.Recurring))
 	if task.RecurrenceRule != "" && task.RecurrenceRule != "none" {
-		b.WriteString(fmt.Sprintf("Rule      : %s\n", task.RecurrenceRule))
+		b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Rule      : "), task.RecurrenceRule))
 	}
 	if task.RecurrenceInterval > 0 {
-		b.WriteString(fmt.Sprintf("Interval  : %d\n", task.RecurrenceInterval))
+		b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Interval  : "), task.RecurrenceInterval))
 	}
 	return b.String()
 }
@@ -1539,8 +1650,12 @@ func emptyPlaceholder(v string) string {
 
 func (m Model) renderStatusBar() string {
 	modeLabel := m.modeLabel()
+	style := m.styles.Status
+	if m.mode == modeTrash || m.mode == modeNote {
+		style = m.styles.StatusAlt
+	}
 	if m.mode == modeReport {
-		return fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status)
+		return style.Render(fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status))
 	}
 	if m.mode == modeNote {
 		target := ""
@@ -1548,9 +1663,9 @@ func (m Model) renderStatusBar() string {
 			target = m.note.target.label()
 		}
 		if target != "" {
-			return fmt.Sprintf("[bada] [%s] %s  %s", modeLabel, target, m.status)
+			return style.Render(fmt.Sprintf("[bada] [%s] %s  %s", modeLabel, target, m.status))
 		}
-		return fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status)
+		return style.Render(fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status))
 	}
 	if m.mode == modeTrash {
 		sel := m.selectedTrashCount()
@@ -1559,7 +1674,7 @@ func (m Model) renderStatusBar() string {
 		if total > 0 {
 			cur = m.trashCursor + 1
 		}
-		return fmt.Sprintf("[bada] [%s] cur:%d/%d sel:%d path:%s  %s", modeLabel, cur, total, sel, m.store.TrashDir(), m.status)
+		return style.Render(fmt.Sprintf("[bada] [%s] cur:%d/%d sel:%d path:%s  %s", modeLabel, cur, total, sel, m.store.TrashDir(), m.status))
 	}
 	total := len(m.visibleItems())
 	cursor := 0
@@ -1570,7 +1685,36 @@ func (m Model) renderStatusBar() string {
 	if m.searchActive() {
 		search = fmt.Sprintf(" search:%q", m.searchQuery)
 	}
-	return fmt.Sprintf("[bada] [%s] sort:%s%s  %d/%d  %s", modeLabel, m.sortMode, search, cursor, total, m.status)
+	return style.Render(fmt.Sprintf("[bada] [%s] sort:%s%s  %d/%d  %s", modeLabel, m.sortMode, search, cursor, total, m.status))
+}
+
+func (m Model) fillView(body string) string {
+	if m.height <= 0 {
+		return body + m.renderStatusBar()
+	}
+	lines := countLines(body)
+	target := m.height - 1
+	if target < 0 {
+		target = 0
+	}
+	if lines < target {
+		body += strings.Repeat("\n", target-lines)
+	}
+	return body + m.renderStatusBar()
+}
+
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+func (m Model) ruleLine(width int) string {
+	if width <= 0 {
+		width = 24
+	}
+	return strings.Repeat("─", width)
 }
 
 func (m Model) modeLabel() string {
@@ -1914,7 +2058,7 @@ func overdueBadge(t storage.Task) string {
 		return ""
 	}
 	days := int(time.Since(t.Due.Time).Hours()/24) + 1
-	return fmt.Sprintf("[overdue %dd]", days)
+	return fmt.Sprintf("[+%dd]", days)
 }
 
 func overdueDetail(t storage.Task) string {
@@ -2045,9 +2189,9 @@ func (m *Model) processNavKey(key string) bool {
 
 func humanDone(done bool) string {
 	if done {
-		return "done"
+		return "✓"
 	}
-	return "pending"
+	return "⏳"
 }
 
 func filterDigits(v string) string {
