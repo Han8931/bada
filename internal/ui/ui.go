@@ -110,6 +110,8 @@ type Model struct {
 	width         int
 	height        int
 	noteScroll    int
+	noteConfirm   bool
+	notePending   noteTarget
 	confirmDel    bool
 	pendingDel    *storage.Task
 	confirmTopic  bool
@@ -446,9 +448,6 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var b strings.Builder
 
-	b.WriteString(m.styles.Title.Render("bada (Bubble Tea + SQLite)"))
-	b.WriteString("\n\n")
-
 	if m.mode == modeNote {
 		b.WriteString(m.renderNoteView())
 		b.WriteString("\n\n")
@@ -456,20 +455,14 @@ func (m Model) View() string {
 	}
 
 	if m.mode == modeReport {
-		b.WriteString(m.styles.Accent.Render(" ____    _    ____    _    "))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Accent.Render("| __ )  / \\  |  _ \\  / \\   "))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Accent.Render("|  _ \\ / _ \\ | | | / _ \\  "))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Accent.Render("| |_) / ___ \\| |_| / ___ \\ "))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Accent.Render("|____/_/   \\_\\____/_/   \\_\\"))
+		b.WriteString(m.renderListBanner())
 		b.WriteString("\n\n")
 		b.WriteString(m.styles.Accent.Render("Reminder Report"))
 		b.WriteString("\n\n")
 		b.WriteString(m.report)
 	} else {
+		b.WriteString(m.renderListBanner())
+		b.WriteString("\n\n")
 		b.WriteString(m.renderTaskList())
 	}
 
@@ -698,6 +691,32 @@ func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 }
 
 func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
+	if m.noteConfirm {
+		switch key {
+		case "y", "Y":
+			if err := m.clearNote(m.notePending); err != nil {
+				m.status = fmt.Sprintf("note delete failed: %v", err)
+				m.noteConfirm = false
+				return m, nil
+			}
+			if m.notePending.kind == noteTask {
+				m.applyTaskNoteLocal(m.notePending.taskID, "")
+			}
+			if m.note != nil && m.note.target.matches(m.notePending) {
+				m.note.body = ""
+				m.noteScroll = 0
+			}
+			m.noteConfirm = false
+			m.status = "Note deleted"
+			return m, nil
+		case "n", "N", "esc":
+			m.noteConfirm = false
+			m.status = "Delete cancelled"
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
 	switch key {
 	case m.cfg.Keys.Cancel, m.cfg.Keys.Confirm, "esc", m.cfg.Keys.Quit, "q", "enter":
 		m.mode = modeList
@@ -706,6 +725,14 @@ func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case m.cfg.Keys.Edit:
 		return m.startNoteEditFromState()
+	case "d":
+		if m.note == nil {
+			return m, nil
+		}
+		m.noteConfirm = true
+		m.notePending = m.note.target
+		m.status = "Delete note? y/n"
+		return m, nil
 	case "j", "down":
 		max := m.noteMaxScroll()
 		if m.noteScroll < max {
@@ -826,7 +853,7 @@ func (m Model) renderTaskList() string {
 		b.WriteString("\n")
 	}
 
-	header := "   S  Title                                   Due"
+	header := "      Title                                   Due"
 	lineWidth := len(header)
 	if m.width > lineWidth {
 		lineWidth = m.width
@@ -997,7 +1024,7 @@ func (m Model) renderNoteView() string {
 		m.styles.Heading.Render("Notes: ") + m.styles.Accent.Render(m.note.target.label()),
 		"",
 	}
-	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit",
+	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit, d to delete",
 		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit))
 
 	bodyLines := m.noteBodyLines()
@@ -1832,11 +1859,36 @@ func (m Model) noteMaxScroll() int {
 	return m.noteMaxScrollWith(available, len(bodyLines))
 }
 
+func (m Model) clearNote(target noteTarget) error {
+	switch target.kind {
+	case noteTask:
+		return m.store.UpdateTaskNotes(target.taskID, "")
+	case noteTopic:
+		return m.store.DeleteTopicNote(target.topic)
+	default:
+		return nil
+	}
+}
+
 func (m Model) noteMaxScrollWith(available, bodyLines int) int {
 	if available <= 0 || bodyLines <= available {
 		return 0
 	}
 	return bodyLines - available
+}
+
+func (m Model) renderListBanner() string {
+	lines := []string{
+		" ____    _    ____    _    ",
+		"| __ )  / \\  |  _ \\  / \\   ",
+		"|  _ \\ / _ \\ | | | / _ \\  ",
+		"| |_) / ___ \\| |_| / ___ \\ ",
+		"|____/_/   \\_\\____/_/   \\_\\",
+	}
+	for i, line := range lines {
+		lines[i] = m.styles.Accent.Render(line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderInlineMarkdown(input string) string {
