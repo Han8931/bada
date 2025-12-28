@@ -35,12 +35,16 @@ Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to custo
 
 # Todo
 
+## Basic Features
 * Agenda reporting config (+7 or +3)
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
-* **Interface Customization:** Fully themeable TUI with support for 256-colors/TrueColor and configurable border styles.
 * Integrate with Gorae / Bori
+
+## UI
+* Markdown view
+* 
 
 ## AI Features
 
