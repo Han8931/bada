@@ -109,6 +109,7 @@ type Model struct {
 	styles        uiStyles
 	width         int
 	height        int
+	noteScroll    int
 	confirmDel    bool
 	pendingDel    *storage.Task
 	confirmTopic  bool
@@ -705,6 +706,17 @@ func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case m.cfg.Keys.Edit:
 		return m.startNoteEditFromState()
+	case "j", "down":
+		max := m.noteMaxScroll()
+		if m.noteScroll < max {
+			m.noteScroll++
+		}
+		return m, nil
+	case "k", "up":
+		if m.noteScroll > 0 {
+			m.noteScroll--
+		}
+		return m, nil
 	default:
 		return m, nil
 	}
@@ -937,6 +949,7 @@ func (m Model) startNoteView() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.note = &noteState{target: target, body: notes}
+	m.noteScroll = 0
 	m.mode = modeNote
 	m.status = fmt.Sprintf("Notes: %s", target.label())
 	return m, nil
@@ -980,17 +993,51 @@ func (m Model) renderNoteView() string {
 		return m.styles.Muted.Render("No notes")
 	}
 	var b strings.Builder
-	b.WriteString(m.styles.Heading.Render("Notes: "))
-	b.WriteString(m.styles.Accent.Render(m.note.target.label()))
-	b.WriteString("\n\n")
-	body := m.note.body
-	if strings.TrimSpace(body) == "" {
-		body = m.styles.Muted.Render("(empty)")
+	headerLines := []string{
+		m.styles.Heading.Render("Notes: ") + m.styles.Accent.Render(m.note.target.label()),
+		"",
 	}
-	b.WriteString(body)
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit",
-		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit)))
+	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit",
+		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit))
+
+	bodyLines := m.noteBodyLines()
+	available := m.noteAvailableHeight()
+	if available < 0 {
+		for _, line := range headerLines {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		for _, line := range bodyLines {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(footerLine)
+		return b.String()
+	}
+	maxScroll := m.noteMaxScrollWith(available, len(bodyLines))
+	scroll := m.noteScroll
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+	start := scroll
+	end := start + available
+	if start < 0 {
+		start = 0
+	}
+	if end > len(bodyLines) {
+		end = len(bodyLines)
+	}
+	for _, line := range headerLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	for _, line := range bodyLines[start:end] {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(footerLine)
 	return b.String()
 }
 
@@ -999,7 +1046,7 @@ func (m Model) noteEditorCmd(target noteTarget, notes string) (tea.Cmd, error) {
 	if len(parts) == 0 {
 		return nil, errors.New("editor not set")
 	}
-	tmp, err := os.CreateTemp("", "bada-note-*.txt")
+	tmp, err := os.CreateTemp("", "bada-note-*.md")
 	if err != nil {
 		return nil, err
 	}
@@ -1107,6 +1154,7 @@ func (m Model) handleNoteEdited(msg noteEditedMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.note != nil && m.note.target.matches(msg.target) {
 		m.note.body = msg.notes
+		m.noteScroll = clampInt(m.noteScroll, 0, m.noteMaxScroll())
 	}
 	return m, nil
 }
@@ -1661,7 +1709,6 @@ func (m Model) renderMetadataPanel() string {
 		return m.styles.Muted.Render("No task selected")
 	}
 	var b strings.Builder
-	b.WriteString("\n")
 	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Title     : "), task.Title))
 	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Tags      : "), emptyPlaceholder(task.Tags)))
 	b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Priority  : "), task.Priority))
@@ -1687,6 +1734,247 @@ func truncateText(text string, max int) string {
 		return text[:max]
 	}
 	return text[:max-1] + "…"
+}
+
+func (m Model) renderMarkdown(input string) string {
+	var b strings.Builder
+	lines := strings.Split(input, "\n")
+	inCode := false
+	var codeLines []string
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "```") {
+			inCode = !inCode
+			if !inCode {
+				b.WriteString(m.renderCodeBlock(codeLines))
+				b.WriteString("\n")
+				codeLines = nil
+			}
+			continue
+		}
+		if inCode {
+			codeLines = append(codeLines, line)
+			continue
+		}
+		if trim == "" {
+			b.WriteString("\n")
+			continue
+		}
+		if isRuleLine(trim) {
+			b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
+			b.WriteString("\n")
+			continue
+		}
+		if strings.HasPrefix(trim, "#") {
+			level, title := parseHeading(trim)
+			hashes := strings.Repeat("#", level)
+			prefix := m.styles.Muted.Render(hashes + " ")
+			style := m.styles.Heading
+			if level == 1 {
+				style = m.styles.Accent
+			}
+			b.WriteString(prefix + style.Render(title))
+			b.WriteString("\n")
+			continue
+		}
+		if prefix, rest, ok := parseList(trim); ok {
+			b.WriteString(prefix)
+			b.WriteString(m.renderInlineMarkdown(rest))
+			b.WriteString("\n")
+			continue
+		}
+		if strings.HasPrefix(trim, ">") {
+			rest := strings.TrimSpace(strings.TrimPrefix(trim, ">"))
+			b.WriteString(m.styles.Muted.Render("│ "))
+			b.WriteString(m.renderInlineMarkdown(rest))
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString(m.renderInlineMarkdown(line))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) noteBodyLines() []string {
+	if m.note == nil {
+		return []string{m.styles.Muted.Render("(empty)")}
+	}
+	body := m.note.body
+	if strings.TrimSpace(body) == "" {
+		return []string{m.styles.Muted.Render("(empty)")}
+	}
+	rendered := m.renderMarkdown(body)
+	return strings.Split(rendered, "\n")
+}
+
+func (m Model) noteAvailableHeight() int {
+	if m.height <= 0 {
+		return -1
+	}
+	headerLines := 2
+	footerLines := 1
+	blankBeforeFooter := 1
+	usable := m.height - 1 - headerLines - footerLines - blankBeforeFooter
+	if usable < 0 {
+		return 0
+	}
+	return usable
+}
+
+func (m Model) noteMaxScroll() int {
+	available := m.noteAvailableHeight()
+	if available < 0 {
+		return 0
+	}
+	bodyLines := m.noteBodyLines()
+	return m.noteMaxScrollWith(available, len(bodyLines))
+}
+
+func (m Model) noteMaxScrollWith(available, bodyLines int) int {
+	if available <= 0 || bodyLines <= available {
+		return 0
+	}
+	return bodyLines - available
+}
+
+func (m Model) renderInlineMarkdown(input string) string {
+	var b strings.Builder
+	var buf strings.Builder
+	inBold := false
+	inItalic := false
+	inCode := false
+	flush := func() {
+		if buf.Len() == 0 {
+			return
+		}
+		text := buf.String()
+		buf.Reset()
+		switch {
+		case inCode:
+			b.WriteString(m.styles.Muted.Render(text))
+		case inBold && inItalic:
+			b.WriteString(lipgloss.NewStyle().Bold(true).Italic(true).Render(text))
+		case inBold:
+			b.WriteString(lipgloss.NewStyle().Bold(true).Render(text))
+		case inItalic:
+			b.WriteString(lipgloss.NewStyle().Italic(true).Render(text))
+		default:
+			b.WriteString(text)
+		}
+	}
+	runes := []rune(input)
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		if ch == '`' {
+			flush()
+			inCode = !inCode
+			continue
+		}
+		if ch == '*' && next == '*' {
+			flush()
+			inBold = !inBold
+			i++
+			continue
+		}
+		if ch == '*' || ch == '_' {
+			flush()
+			inItalic = !inItalic
+			continue
+		}
+		buf.WriteRune(ch)
+	}
+	flush()
+	return b.String()
+}
+
+func parseHeading(line string) (int, string) {
+	level := 0
+	for _, r := range line {
+		if r != '#' {
+			break
+		}
+		level++
+	}
+	if level == 0 {
+		return 0, line
+	}
+	title := strings.TrimSpace(line[level:])
+	if title == "" {
+		title = strings.Repeat("#", level)
+	}
+	if level > 6 {
+		level = 6
+	}
+	return level, title
+}
+
+func parseList(line string) (string, string, bool) {
+	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") || strings.HasPrefix(line, "+ ") {
+		return "  • ", strings.TrimSpace(line[2:]), true
+	}
+	dot := strings.Index(line, ". ")
+	if dot > 0 {
+		prefix := line[:dot]
+		if _, err := strconv.Atoi(prefix); err == nil {
+			return "  • ", strings.TrimSpace(line[dot+2:]), true
+		}
+	}
+	return "", "", false
+}
+
+func isRuleLine(line string) bool {
+	if len(line) < 3 {
+		return false
+	}
+	for _, r := range line {
+		if r != '-' && r != '_' && r != '*' {
+			return false
+		}
+	}
+	return true
+}
+
+func (m Model) renderCodeBlock(lines []string) string {
+	if len(lines) == 0 {
+		return m.styles.Border.Render("┌──┐") + "\n" + m.styles.Border.Render("└──┘")
+	}
+	maxLen := 0
+	for _, line := range lines {
+		if len(line) > maxLen {
+			maxLen = len(line)
+		}
+	}
+	contentWidth := maxLen
+	if m.width > 0 {
+		limit := m.width - 4
+		if limit > 0 && contentWidth > limit {
+			contentWidth = limit
+		}
+	}
+	horiz := strings.Repeat("─", contentWidth+2)
+	var b strings.Builder
+	b.WriteString(m.styles.Border.Render("┌" + horiz + "┐"))
+	b.WriteString("\n")
+	for _, line := range lines {
+		text := truncateText(line, contentWidth)
+		padding := contentWidth - len(text)
+		if padding < 0 {
+			padding = 0
+		}
+		b.WriteString(m.styles.Border.Render("│ "))
+		b.WriteString(m.styles.Muted.Render(text))
+		b.WriteString(strings.Repeat(" ", padding))
+		b.WriteString(m.styles.Border.Render(" │"))
+		b.WriteString("\n")
+	}
+	b.WriteString(m.styles.Border.Render("└" + horiz + "┘"))
+	return b.String()
 }
 
 func emptyPlaceholder(v string) string {
@@ -2099,6 +2387,16 @@ func clampCursor(cur, n int) int {
 		return n - 1
 	}
 	return cur
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 func overdueBadge(t storage.Task) string {
