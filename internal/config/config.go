@@ -79,6 +79,7 @@ func LoadOrCreate(path string) (Config, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	applyKeyDefaults(&cfg)
 	if cfg.DBPath == "" {
 		cfg.DBPath = DefaultDBName
 	}
@@ -86,6 +87,76 @@ func LoadOrCreate(path string) (Config, error) {
 		cfg.TrashDir = DefaultTrashDir
 	}
 	return cfg, nil
+}
+
+func applyKeyDefaults(cfg *Config) {
+	def := defaultConfig().Keys
+	if cfg.Keys.Quit == "" {
+		cfg.Keys.Quit = def.Quit
+	}
+	if cfg.Keys.Add == "" {
+		cfg.Keys.Add = def.Add
+	}
+	if cfg.Keys.Up == "" {
+		cfg.Keys.Up = def.Up
+	}
+	if cfg.Keys.Down == "" {
+		cfg.Keys.Down = def.Down
+	}
+	if cfg.Keys.Toggle == "" {
+		cfg.Keys.Toggle = def.Toggle
+	}
+	if cfg.Keys.Delete == "" {
+		cfg.Keys.Delete = def.Delete
+	}
+	if cfg.Keys.Detail == "" {
+		cfg.Keys.Detail = def.Detail
+	}
+	if cfg.Keys.Confirm == "" {
+		cfg.Keys.Confirm = def.Confirm
+	}
+	if cfg.Keys.Cancel == "" {
+		cfg.Keys.Cancel = def.Cancel
+	}
+	if cfg.Keys.Edit == "" {
+		cfg.Keys.Edit = def.Edit
+	}
+	if cfg.Keys.Trash == "" {
+		cfg.Keys.Trash = def.Trash
+	}
+	if cfg.Keys.Rename == "" {
+		cfg.Keys.Rename = def.Rename
+	}
+	if cfg.Keys.PriorityUp == "" {
+		cfg.Keys.PriorityUp = def.PriorityUp
+	}
+	if cfg.Keys.PriorityDown == "" {
+		cfg.Keys.PriorityDown = def.PriorityDown
+	}
+	if cfg.Keys.DueForward == "" {
+		cfg.Keys.DueForward = def.DueForward
+	}
+	if cfg.Keys.DueBack == "" {
+		cfg.Keys.DueBack = def.DueBack
+	}
+	if cfg.Keys.SortDue == "" {
+		cfg.Keys.SortDue = def.SortDue
+	}
+	if cfg.Keys.SortPriority == "" {
+		cfg.Keys.SortPriority = def.SortPriority
+	}
+	if cfg.Keys.SortCreated == "" {
+		cfg.Keys.SortCreated = def.SortCreated
+	}
+	if cfg.Keys.DeleteAllDone == "" {
+		cfg.Keys.DeleteAllDone = def.DeleteAllDone
+	}
+	if cfg.Keys.Search == "" {
+		cfg.Keys.Search = def.Search
+	}
+	if cfg.Keys.NoteView == "" {
+		cfg.Keys.NoteView = def.NoteView
+	}
 }
 
 func write(path string, cfg Config) error {

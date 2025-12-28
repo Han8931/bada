@@ -112,7 +112,10 @@ CREATE TABLE IF NOT EXISTS tasks (
 );`); err != nil {
 		return err
 	}
-	return s.ensureTaskColumns()
+	if err := s.ensureTaskColumns(); err != nil {
+		return err
+	}
+	return s.ensureTopicNoteColumns()
 }
 
 func (s *Store) ensureTaskColumns() error {
@@ -127,6 +130,37 @@ func (s *Store) ensureTaskColumns() error {
 	}
 	existing := map[string]struct{}{}
 	rows, err := s.db.Query(`PRAGMA table_info(tasks);`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	for col, alter := range required {
+		if _, ok := existing[col]; ok {
+			continue
+		}
+		if _, err := s.db.Exec(alter); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) ensureTopicNoteColumns() error {
+	required := map[string]string{
+		"notes": "ALTER TABLE topic_notes ADD COLUMN notes TEXT NOT NULL DEFAULT '';",
+	}
+	existing := map[string]struct{}{}
+	rows, err := s.db.Query(`PRAGMA table_info(topic_notes);`)
 	if err != nil {
 		return err
 	}
