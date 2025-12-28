@@ -32,6 +32,18 @@ Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to custo
 - Press `T` to open Trash; `space` multi-selects (auto-advances), `u` restores selected/current, `P` purges (with confirm), `esc`/`q` exits.
 - Status bar shows cursor, selection count, and trash path; clear the folder to purge manually if needed.
 
+## Install (Linux)
+
+```
+./install.sh
+```
+
+Options:
+
+```
+./install.sh --prefix /usr/local --bin-name bada
+```
+
 
 # Todo
 
