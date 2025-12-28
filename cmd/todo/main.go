@@ -16,7 +16,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := storage.Open(cfg.DBPath)
+	store, err := storage.Open(cfg.DBPath, cfg.TrashDir)
 	if err != nil {
 		fmt.Printf("failed to open database: %v\n", err)
 		os.Exit(1)

@@ -1,5 +1,6 @@
 db_path = "todo.db"
 default_filter = "all"
+trash_dir = "trash"
 
 [keys]
 quit = "q"
@@ -8,6 +9,7 @@ up = "k"
 down = "j"
 toggle = " "
 delete = "d"
+trash = "T"
 detail = "enter"
 confirm = "enter"
 cancel = "esc"
@@ -21,4 +23,3 @@ sort_due = "sd"
 sort_priority = "sp"
 sort_created = "st"
 delete_all_done = "D"
-

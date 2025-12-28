@@ -23,6 +23,7 @@ const (
 	modeMetadata
 	modeRename
 	modeCommand
+	modeTrash
 )
 
 type metaState struct {
@@ -43,7 +44,9 @@ type Model struct {
 	store         *storage.Store
 	cfg           config.Config
 	tasks         []storage.Task
+	trash         []storage.TrashEntry
 	cursor        int
+	trashCursor   int
 	mode          mode
 	input         textinput.Model
 	status        string
@@ -53,6 +56,9 @@ type Model struct {
 	currentTopic  string
 	confirmDel    bool
 	pendingDel    *storage.Task
+	trashSelected map[int]bool
+	trashConfirm  bool
+	trashPending  []storage.TrashEntry
 	meta          *metaState
 	renameID      int
 	renameTopic   string
@@ -72,16 +78,17 @@ func Run(store *storage.Store, cfg config.Config) error {
 	ti.Prompt = ""
 
 	m := Model{
-		store:        store,
-		cfg:          cfg,
-		tasks:        tasks,
-		cursor:       clampCursor(0, len(tasks)),
-		status:       "",
-		input:        ti,
-		mode:         modeList,
-		filterDone:   strings.ToLower(cfg.DefaultFilter),
-		sortMode:     "created",
-		currentTopic: "",
+		store:         store,
+		cfg:           cfg,
+		tasks:         tasks,
+		cursor:        clampCursor(0, len(tasks)),
+		trashSelected: map[int]bool{},
+		status:        "",
+		input:         ti,
+		mode:          modeList,
+		filterDone:    strings.ToLower(cfg.DefaultFilter),
+		sortMode:      "created",
+		currentTopic:  "",
 	}
 	m.sortTasks()
 
@@ -99,6 +106,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
+		}
+		if m.mode == modeTrash {
+			return m.updateTrashMode(msg.String(), msg)
 		}
 		if m.mode == modeRename {
 			return m.updateRenameMode(msg.String(), msg)
@@ -308,6 +318,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.sortMode = "created"
 		m.sortTasks()
 		m.status = "Sorted by created time"
+	case m.cfg.Keys.Trash, "T":
+		return m.enterTrashView()
 	case "l", "right", "enter":
 		if m.currentTopic == "" && len(vis) > 0 && m.cursor < len(vis) {
 			it := vis[m.cursor]
@@ -341,6 +353,10 @@ func (m Model) View() string {
 		b.WriteString("Field: " + m.currentMetaLabel())
 		b.WriteString("\n")
 		b.WriteString(m.input.View())
+	} else if m.mode == modeTrash {
+		b.WriteString("Trash (space to select, u to restore, esc to exit)")
+		b.WriteString("\n\n")
+		b.WriteString(m.renderTrashList())
 	} else if m.mode == modeAdd {
 		b.WriteString("Add task: ")
 		b.WriteString(m.input.View())
@@ -383,7 +399,7 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 			if errReload == nil {
 				m.sortTasks()
 				m.cursor = clampCursor(m.cursor, len(m.tasks))
-				m.status = fmt.Sprintf("Deleted %d done tasks", n)
+				m.status = fmt.Sprintf("Moved %d done tasks to trash", n)
 			} else {
 				m.status = fmt.Sprintf("reload failed: %v", errReload)
 			}
@@ -401,7 +417,7 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 		if err == nil {
 			m.sortTasks()
 			m.cursor = clampCursor(m.cursor, len(m.tasks))
-			m.status = "Deleted task"
+			m.status = "Deleted task (moved to trash)"
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
 		}
@@ -413,9 +429,174 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) enterTrashView() (tea.Model, tea.Cmd) {
+	entries, err := m.store.ListTrash()
+	if err != nil {
+		m.status = fmt.Sprintf("trash load failed: %v", err)
+		return m, nil
+	}
+	m.trash = entries
+	m.trashSelected = map[int]bool{}
+	m.trashCursor = clampCursor(0, len(entries))
+	m.mode = modeTrash
+	m.status = fmt.Sprintf("Trash: %d item(s). space to select, u to restore, P to purge, esc to exit", len(entries))
+	return m, nil
+}
+
+func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.trashConfirm {
+		switch key {
+		case "y", "Y":
+			if err := m.store.PurgeTrash(m.trashPending); err != nil {
+				m.status = fmt.Sprintf("purge failed: %v", err)
+			} else {
+				var err error
+				m.trash, err = m.store.ListTrash()
+				if err != nil {
+					m.status = fmt.Sprintf("reload trash failed: %v", err)
+				} else {
+					m.status = fmt.Sprintf("Purged %d item(s)", len(m.trashPending))
+				}
+				m.trashSelected = map[int]bool{}
+				m.trashCursor = clampCursor(m.trashCursor, len(m.trash))
+			}
+			m.trashConfirm = false
+			m.trashPending = nil
+			return m, nil
+		case "n", "N", "esc":
+			m.trashConfirm = false
+			m.trashPending = nil
+			m.status = "Purge cancelled"
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+	switch key {
+	case m.cfg.Keys.Cancel, "esc", m.cfg.Keys.Quit, "q":
+		m.mode = modeList
+		m.trashSelected = map[int]bool{}
+		m.status = "Exited trash"
+		return m, nil
+	case m.cfg.Keys.Up, "up":
+		if len(m.trash) == 0 {
+			return m, nil
+		}
+		if m.trashCursor > 0 {
+			m.trashCursor--
+		}
+	case m.cfg.Keys.Down, "down":
+		if len(m.trash) == 0 {
+			return m, nil
+		}
+		m.trashCursor = clampCursor(m.trashCursor+1, len(m.trash))
+	case " ":
+		if len(m.trash) == 0 {
+			return m, nil
+		}
+		m.toggleTrashSelection(m.trashCursor)
+		m.trashCursor = clampCursor(m.trashCursor+1, len(m.trash))
+	case "u":
+		return m.restoreTrashSelection()
+	case "P":
+		return m.confirmPurgeTrash()
+	}
+	return m, nil
+}
+
+func (m Model) toggleTrashSelection(idx int) {
+	if m.trashSelected == nil {
+		m.trashSelected = map[int]bool{}
+	}
+	if m.trashSelected[idx] {
+		delete(m.trashSelected, idx)
+	} else {
+		m.trashSelected[idx] = true
+	}
+}
+
+func (m Model) restoreTrashSelection() (tea.Model, tea.Cmd) {
+	if len(m.trash) == 0 {
+		m.status = "Trash is empty"
+		return m, nil
+	}
+	if m.trashConfirm {
+		return m, nil
+	}
+	entries := m.selectedTrashEntries()
+	if len(entries) == 0 && m.trashCursor < len(m.trash) {
+		entries = append(entries, m.trash[m.trashCursor])
+	}
+	if len(entries) == 0 {
+		m.status = "Nothing selected"
+		return m, nil
+	}
+	if err := m.store.RestoreTrash(entries); err != nil {
+		m.status = fmt.Sprintf("restore failed: %v", err)
+		return m, nil
+	}
+	var err error
+	m.trash, err = m.store.ListTrash()
+	if err != nil {
+		m.status = fmt.Sprintf("reload trash failed: %v", err)
+		return m, nil
+	}
+	m.trashSelected = map[int]bool{}
+	m.trashCursor = clampCursor(m.trashCursor, len(m.trash))
+	m.tasks, err = m.store.FetchTasks()
+	if err == nil {
+		m.sortTasks()
+		m.status = fmt.Sprintf("Restored %d task(s)", len(entries))
+	} else {
+		m.status = fmt.Sprintf("restore succeeded, reload failed: %v", err)
+	}
+	return m, nil
+}
+
+func (m Model) selectedTrashEntries() []storage.TrashEntry {
+	if len(m.trashSelected) == 0 {
+		return nil
+	}
+	var idxs []int
+	for idx := range m.trashSelected {
+		idxs = append(idxs, idx)
+	}
+	sort.Ints(idxs)
+	entries := make([]storage.TrashEntry, 0, len(idxs))
+	for _, idx := range idxs {
+		if idx >= 0 && idx < len(m.trash) {
+			entries = append(entries, m.trash[idx])
+		}
+	}
+	return entries
+}
+
+func (m Model) selectedTrashCount() int {
+	return len(m.trashSelected)
+}
+
+func (m Model) confirmPurgeTrash() (tea.Model, tea.Cmd) {
+	if len(m.trash) == 0 {
+		m.status = "Trash is empty"
+		return m, nil
+	}
+	entries := m.selectedTrashEntries()
+	if len(entries) == 0 {
+		entries = m.trash
+	}
+	if len(entries) == 0 {
+		m.status = "Nothing to purge"
+		return m, nil
+	}
+	m.trashConfirm = true
+	m.trashPending = entries
+	m.status = fmt.Sprintf("Purge %d trash item(s)? y/n", len(entries))
+	return m, nil
+}
+
 func renderHelp(k config.Keymap) string {
-	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s quit",
-		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Quit)
+	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s quit",
+		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Quit)
 }
 
 func (m Model) renderTaskList() string {
@@ -452,6 +633,32 @@ func (m Model) renderTaskList() string {
 			b.WriteString(body)
 			b.WriteString("\n")
 		}
+	}
+	return b.String()
+}
+
+func (m Model) renderTrashList() string {
+	var b strings.Builder
+	b.WriteString("   Sel Deleted            Title                          Topic\n")
+	b.WriteString("   --- ------------------ ------------------------------ ----------------\n")
+	for i, entry := range m.trash {
+		cursor := " "
+		if m.mode == modeTrash && m.trashCursor == i {
+			cursor = ">"
+		}
+		selected := "[ ]"
+		if m.trashSelected != nil && m.trashSelected[i] {
+			selected = "[*]"
+		}
+		title := entry.Task.Title
+		if len(title) > 30 {
+			title = title[:30]
+		}
+		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
+		b.WriteString(fmt.Sprintf("%s %s %-18s %-30s %-16s\n", cursor, selected, deleted, title, entry.Task.Project))
+	}
+	if len(m.trash) == 0 {
+		b.WriteString("(trash is empty)\n")
 	}
 	return b.String()
 }
@@ -814,6 +1021,15 @@ func emptyPlaceholder(v string) string {
 
 func (m Model) renderStatusBar() string {
 	modeLabel := m.modeLabel()
+	if m.mode == modeTrash {
+		sel := m.selectedTrashCount()
+		total := len(m.trash)
+		cur := 0
+		if total > 0 {
+			cur = m.trashCursor + 1
+		}
+		return fmt.Sprintf("[bada] [%s] cur:%d/%d sel:%d path:%s  %s", modeLabel, cur, total, sel, m.store.TrashDir(), m.status)
+	}
 	total := len(m.tasks)
 	cursor := 0
 	if total > 0 {
@@ -834,6 +1050,8 @@ func (m Model) modeLabel() string {
 		return "RENAME"
 	case modeCommand:
 		return "COMMAND"
+	case modeTrash:
+		return "TRASH"
 	default:
 		return "?"
 	}

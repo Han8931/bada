@@ -2,10 +2,13 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,12 +31,26 @@ type Task struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	trashDir string
 }
 
-func Open(dbPath string) (*Store, error) {
+type TrashEntry struct {
+	Path      string
+	DeletedAt time.Time
+	Task      Task
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func Open(dbPath, trashDir string) (*Store, error) {
 	if dbPath == "" {
 		return nil, errors.New("db path is empty")
+	}
+	if strings.TrimSpace(trashDir) == "" {
+		trashDir = "trash"
 	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
@@ -45,7 +62,14 @@ func Open(dbPath string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	absTrash := trashDir
+	if !filepath.IsAbs(absTrash) {
+		if abs, err := filepath.Abs(trashDir); err == nil {
+			absTrash = abs
+		}
+	}
+
+	s := &Store{db: db, trashDir: absTrash}
 	if err := s.ensureSchema(); err != nil {
 		db.Close()
 		return nil, err
@@ -126,35 +150,9 @@ func (s *Store) FetchTasks() ([]Task, error) {
 
 	var tasks []Task
 	for rows.Next() {
-		var t Task
-		var doneInt, priority, recurring int
-		var rule sql.NullString
-		var interval int
-		var dueStr, startStr sql.NullString
-		var createdStr string
-
-		if err := rows.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &createdStr); err != nil {
+		t, err := scanTask(rows)
+		if err != nil {
 			return nil, err
-		}
-		t.Done = doneInt == 1
-		t.Priority = priority
-		t.Recurring = recurring == 1
-		if rule.Valid {
-			t.RecurrenceRule = rule.String
-		}
-		t.RecurrenceInterval = interval
-		if dueStr.Valid {
-			if parsed, err := time.Parse(time.RFC3339, dueStr.String); err == nil {
-				t.Due = sql.NullTime{Time: parsed, Valid: true}
-			}
-		}
-		if startStr.Valid {
-			if parsed, err := time.Parse(time.RFC3339, startStr.String); err == nil {
-				t.Start = sql.NullTime{Time: parsed, Valid: true}
-			}
-		}
-		if created, err := time.Parse(time.RFC3339, createdStr); err == nil {
-			t.CreatedAt = created
 		}
 		tasks = append(tasks, t)
 	}
@@ -180,11 +178,27 @@ func (s *Store) SetDone(id int, done bool) error {
 }
 
 func (s *Store) DeleteTask(id int) error {
-	_, err := s.db.Exec(`DELETE FROM tasks WHERE id = ?;`, id)
+	task, err := s.fetchTaskByID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.moveToTrash([]Task{task}); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`DELETE FROM tasks WHERE id = ?;`, id)
 	return err
 }
 
 func (s *Store) DeleteDoneTasks() (int64, error) {
+	doneTasks, err := s.fetchDoneTasks()
+	if err != nil {
+		return 0, err
+	}
+	if len(doneTasks) > 0 {
+		if err := s.moveToTrash(doneTasks); err != nil {
+			return 0, err
+		}
+	}
 	res, err := s.db.Exec(`DELETE FROM tasks WHERE done = 1;`)
 	if err != nil {
 		return 0, err
@@ -258,6 +272,205 @@ func (s *Store) UpdateTaskMetadata(id int, project, tags string, priority int, d
 func (s *Store) UpdateRecurrence(id int, rule string, interval int) error {
 	_, err := s.db.Exec(`UPDATE tasks SET recurrence_rule = ?, recurrence_interval = ? WHERE id = ?;`, rule, interval, id)
 	return err
+}
+
+func (s *Store) ListTrash() ([]TrashEntry, error) {
+	entries := []TrashEntry{}
+	dirEntries, err := os.ReadDir(s.trashDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return entries, nil
+		}
+		return nil, err
+	}
+	for _, de := range dirEntries {
+		if de.IsDir() {
+			continue
+		}
+		path := filepath.Join(s.trashDir, de.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var payload struct {
+			DeletedAt time.Time `json:"deleted_at"`
+			Task      Task      `json:"task"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		entries = append(entries, TrashEntry{
+			Path:      path,
+			DeletedAt: payload.DeletedAt,
+			Task:      payload.Task,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].DeletedAt.After(entries[j].DeletedAt)
+	})
+	return entries, nil
+}
+
+func (s *Store) RestoreTrash(entries []TrashEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		task := e.Task
+		_, err := tx.Exec(`INSERT INTO tasks (title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			task.Title, boolToInt(task.Done), task.Project, task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.CreatedAt.Format(time.RFC3339))
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		_ = os.Remove(e.Path)
+	}
+	return nil
+}
+
+func (s *Store) TrashDir() string {
+	return s.trashDir
+}
+
+func (s *Store) PurgeTrash(entries []TrashEntry) error {
+	for _, e := range entries {
+		if err := os.Remove(e.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) fetchTaskByID(id int) (Task, error) {
+	row := s.db.QueryRow(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks WHERE id = ?;`, id)
+	return scanTask(row)
+}
+
+func (s *Store) fetchDoneTasks() ([]Task, error) {
+	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, created_at FROM tasks WHERE done = 1 ORDER BY id;`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func (s *Store) moveToTrash(tasks []Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(s.trashDir, 0o755); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for i, t := range tasks {
+		payload := struct {
+			DeletedAt time.Time `json:"deleted_at"`
+			Task      Task      `json:"task"`
+		}{
+			DeletedAt: now,
+			Task:      t,
+		}
+		data, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		name := fmt.Sprintf("%s-%d-%d-%s.json", now.Format("20060102T150405Z"), t.ID, i, sanitizeFilename(t.Title))
+		path := filepath.Join(s.trashDir, name)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scanTask(scanner rowScanner) (Task, error) {
+	var t Task
+	var doneInt, priority, recurring int
+	var rule sql.NullString
+	var interval int
+	var dueStr, startStr sql.NullString
+	var createdStr string
+
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &createdStr); err != nil {
+		return Task{}, err
+	}
+	t.Done = doneInt == 1
+	t.Priority = priority
+	t.Recurring = recurring == 1
+	if rule.Valid {
+		t.RecurrenceRule = rule.String
+	}
+	t.RecurrenceInterval = interval
+	if dueStr.Valid {
+		if parsed, err := time.Parse(time.RFC3339, dueStr.String); err == nil {
+			t.Due = sql.NullTime{Time: parsed, Valid: true}
+		}
+	}
+	if startStr.Valid {
+		if parsed, err := time.Parse(time.RFC3339, startStr.String); err == nil {
+			t.Start = sql.NullTime{Time: parsed, Valid: true}
+		}
+	}
+	if created, err := time.Parse(time.RFC3339, createdStr); err == nil {
+		t.CreatedAt = created
+	}
+	return t, nil
+}
+
+func sanitizeFilename(title string) string {
+	title = strings.ToLower(strings.TrimSpace(title))
+	title = strings.ReplaceAll(title, " ", "-")
+
+	var b strings.Builder
+	for _, r := range title {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	res := b.String()
+	if res == "" {
+		res = "task"
+	}
+	if len(res) > 48 {
+		res = res[:48]
+	}
+	return res
+}
+
+func nullTimeToString(t sql.NullTime) sql.NullString {
+	if !t.Valid {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: t.Time.UTC().Format(time.RFC3339), Valid: true}
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func sqliteDSN(path string) string {

@@ -5,6 +5,7 @@
 *.so
 *.dylib
 *.test
+trash/*
 
 # Go build
 *.out

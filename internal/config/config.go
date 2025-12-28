@@ -10,6 +10,7 @@ import (
 const (
 	DefaultConfigFileName = "config.toml"
 	DefaultDBName         = "todo.db"
+	DefaultTrashDir       = "trash"
 )
 
 type Keymap struct {
@@ -23,6 +24,7 @@ type Keymap struct {
 	Confirm       string `toml:"confirm"`
 	Cancel        string `toml:"cancel"`
 	Edit          string `toml:"edit"`
+	Trash         string `toml:"trash"`
 	Rename        string `toml:"rename"`
 	PriorityUp    string `toml:"priority_up"`
 	PriorityDown  string `toml:"priority_down"`
@@ -37,6 +39,7 @@ type Keymap struct {
 type Config struct {
 	DBPath        string `toml:"db_path"`
 	DefaultFilter string `toml:"default_filter"`
+	TrashDir      string `toml:"trash_dir"`
 	Keys          Keymap `toml:"keys"`
 }
 
@@ -59,6 +62,9 @@ func LoadOrCreate(path string) (Config, error) {
 	if cfg.DBPath == "" {
 		cfg.DBPath = DefaultDBName
 	}
+	if cfg.TrashDir == "" {
+		cfg.TrashDir = DefaultTrashDir
+	}
 	return cfg, nil
 }
 
@@ -74,6 +80,7 @@ func defaultConfig() Config {
 	return Config{
 		DBPath:        DefaultDBName,
 		DefaultFilter: "all",
+		TrashDir:      DefaultTrashDir,
 		Keys: Keymap{
 			Quit:          "q",
 			Add:           "a",
@@ -85,6 +92,7 @@ func defaultConfig() Config {
 			Confirm:       "enter",
 			Cancel:        "esc",
 			Edit:          "e",
+			Trash:         "T",
 			Rename:        "r",
 			PriorityUp:    "+",
 			PriorityDown:  "-",

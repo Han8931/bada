@@ -18,6 +18,12 @@
 - Due shift: ] / [ (+1d/-1d).
 - Sort: s then d/p/t.
 
+## Trash
+
+- Deleted tasks are archived as JSON snapshots in `trash_dir` (default `trash/`).
+- Press `T` to open Trash; `space` multi-selects (auto-advances), `u` restores selected/current, `P` purges (with confirm), `esc`/`q` exits.
+- Status bar shows cursor, selection count, and trash path; clear the folder to purge manually if needed.
+
 
 # Todo
 
@@ -65,4 +71,3 @@ I have polished your existing list for clarity and professional terminology, the
 
 * **Hook System:** Allow users to run scripts on certain events (e.g., `on_task_complete` triggers a script that updates a Slack status).
 * **Sync Backend:** Optional end-to-end encrypted sync between multiple machines using a simple central relay or Git-based syncing.
-
