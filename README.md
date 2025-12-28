@@ -29,12 +29,14 @@
 
 # Todo
 
+* Note feature
 * Recently Added / Done
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
 * **Advanced Filtering:** Fuzzy / Boolean search (e.g., `project:work AND tag:urgent`), quick toggles for status, and saved filter views.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * **Interface Customization:** Fully themeable TUI with support for 256-colors/TrueColor and configurable border styles.
+* Integrate with Gorae / Bori
 
 ## AI Features
 
