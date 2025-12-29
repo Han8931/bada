@@ -76,7 +76,7 @@ type uiStyles struct {
 type metaState struct {
 	taskID    int
 	title     string
-	project   string
+	topic     string
 	tags      string
 	priority  string
 	due       string
@@ -387,8 +387,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, humanDone(task.Done))
-		if task.Project != "" {
-			info += " • topic:" + task.Project
+		if task.Topic != "" {
+			info += " • topic:" + task.Topic
 		}
 		if strings.TrimSpace(task.Tags) != "" {
 			info += " • tags:" + task.Tags
@@ -908,8 +908,8 @@ func (m Model) renderTaskList() string {
 					body += " " + m.styles.Warning.Render(recBadge)
 				}
 			}
-			if m.searchActive() && strings.TrimSpace(it.task.Project) != "" {
-				body += " [" + it.task.Project + "]"
+			if m.searchActive() && strings.TrimSpace(it.task.Topic) != "" {
+				body += " [" + it.task.Topic + "]"
 			}
 			if m.cursor == i && m.mode == modeList {
 				body = m.styles.Selection.Render(body)
@@ -949,7 +949,7 @@ func (m Model) renderTrashList() string {
 			title = title[:30]
 		}
 		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
-		line := fmt.Sprintf("%s %s %-18s %-30s %-16s", cursor, selected, deleted, title, entry.Task.Project)
+		line := fmt.Sprintf("%s %s %-18s %-30s %-16s", cursor, selected, deleted, title, entry.Task.Topic)
 		if m.mode == modeTrash && m.trashCursor == i {
 			line = m.styles.Selection.Render(line)
 		} else if m.trashSelected != nil && m.trashSelected[i] {
@@ -1225,7 +1225,7 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
 		taskID:    t.ID,
 		title:     t.Title,
-		project:   t.Project,
+		topic:     t.Topic,
 		tags:      t.Tags,
 		priority:  fmt.Sprintf("%d", t.Priority),
 		due:       formatDate(t.Due),
@@ -1379,7 +1379,7 @@ func (ms metaState) currentValue() string {
 	case 0:
 		return ms.title
 	case 1:
-		return ms.project
+		return ms.topic
 	case 2:
 		return ms.tags
 	case 3:
@@ -1404,7 +1404,7 @@ func (ms *metaState) setCurrentValue(v string) {
 	case 0:
 		ms.title = v
 	case 1:
-		ms.project = v
+		ms.topic = v
 	case 2:
 		ms.tags = v
 	case 3:
@@ -1477,7 +1477,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 	}
 	interval := parseInterval(m.meta.interval)
 
-	if err := m.store.UpdateTaskMetadata(taskID, m.meta.project, m.meta.tags, priority, due, start, recurring); err != nil {
+	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, priority, due, start, recurring); err != nil {
 		return m, err
 	}
 	if err := m.store.UpdateRecurrence(taskID, rule, interval); err != nil {
@@ -1574,7 +1574,7 @@ func (m Model) renderMetaBox() string {
 	fields := metaFields()
 	values := []string{
 		m.meta.title,
-		m.meta.project,
+		m.meta.topic,
 		m.meta.tags,
 		m.meta.priority,
 		m.meta.due,
@@ -2744,7 +2744,7 @@ func (m Model) defaultVisibleItems() []listItem {
 			items = append(items, listItem{kind: itemTopic, topic: topic})
 		}
 		for _, t := range m.tasks {
-			if strings.TrimSpace(t.Project) == "" {
+			if strings.TrimSpace(t.Topic) == "" {
 				items = append(items, listItem{kind: itemTask, task: t})
 			}
 		}
@@ -2762,7 +2762,7 @@ func (m Model) defaultVisibleItems() []listItem {
 		}
 	default:
 		for _, t := range m.tasks {
-			if t.Project == m.currentTopic {
+			if t.Topic == m.currentTopic {
 				items = append(items, listItem{kind: itemTask, task: t})
 			}
 		}
@@ -2785,7 +2785,7 @@ func (m Model) searchItems() []listItem {
 		candidates = m.recentlyDone(m.recentLimit)
 	case m.currentTopic != "":
 		for _, t := range m.tasks {
-			if t.Project == m.currentTopic {
+			if t.Topic == m.currentTopic {
 				candidates = append(candidates, t)
 			}
 		}
@@ -2794,7 +2794,7 @@ func (m Model) searchItems() []listItem {
 	}
 	for _, t := range candidates {
 		if taskMatchesQuery(t, q) {
-			items = append(items, listItem{kind: itemTask, task: t, topic: t.Project})
+			items = append(items, listItem{kind: itemTask, task: t, topic: t.Topic})
 		}
 	}
 	return items
@@ -2805,7 +2805,7 @@ func (m Model) searchActive() bool {
 }
 
 func taskMatchesQuery(t storage.Task, query string) bool {
-	fields := []string{t.Title, t.Project, t.Tags}
+	fields := []string{t.Title, t.Topic, t.Tags}
 	if t.Due.Valid {
 		fields = append(fields, t.Due.Time.Format("2006-01-02"))
 	}
@@ -2824,7 +2824,7 @@ func (m Model) topicCounts() map[string]int {
 		if t.Done || !t.Due.Valid || !now.After(t.Due.Time) {
 			continue
 		}
-		topic := strings.TrimSpace(t.Project)
+		topic := strings.TrimSpace(t.Topic)
 		if topic == "" {
 			continue
 		}
@@ -2839,7 +2839,7 @@ func (m Model) topicCounts() map[string]int {
 func (m Model) sortedTopics() []string {
 	set := map[string]struct{}{}
 	for _, t := range m.tasks {
-		topic := strings.TrimSpace(t.Project)
+		topic := strings.TrimSpace(t.Topic)
 		if topic == "" {
 			continue
 		}

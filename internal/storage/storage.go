@@ -19,7 +19,7 @@ type Task struct {
 	ID                 int
 	Title              string
 	Done               bool
-	Project            string
+	Topic              string
 	Tags               string
 	Due                sql.NullTime
 	Start              sql.NullTime
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	title TEXT NOT NULL,
 	done INTEGER NOT NULL DEFAULT 0,
-	project TEXT DEFAULT '',
+	topic TEXT DEFAULT '',
 	tags TEXT DEFAULT '',
 	due TEXT DEFAULT NULL,
 	start_at TEXT DEFAULT NULL,
@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 func (s *Store) ensureTaskColumns() error {
 	required := map[string]string{
+		"topic":               "ALTER TABLE tasks ADD COLUMN topic TEXT DEFAULT '';",
 		"start_at":            "ALTER TABLE tasks ADD COLUMN start_at TEXT DEFAULT NULL;",
 		"priority":            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
 		"recurring":           "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
@@ -143,6 +144,15 @@ func (s *Store) ensureTaskColumns() error {
 			return err
 		}
 		existing[name] = struct{}{}
+	}
+	if _, ok := existing["project"]; ok {
+		if _, hasTopic := existing["topic"]; !hasTopic {
+			if _, err := s.db.Exec(`ALTER TABLE tasks RENAME COLUMN project TO topic;`); err != nil {
+				return err
+			}
+			delete(existing, "project")
+			existing["topic"] = struct{}{}
+		}
 	}
 	for col, alter := range required {
 		if _, ok := existing[col]; ok {
@@ -187,7 +197,7 @@ func (s *Store) ensureTopicNoteColumns() error {
 }
 
 func (s *Store) FetchTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +264,7 @@ func (s *Store) DeleteDoneTasks() (int64, error) {
 }
 
 func (s *Store) RenameTopic(oldName, newName string) (int64, error) {
-	res, err := s.db.Exec(`UPDATE tasks SET project = ? WHERE project = ?;`, newName, oldName)
+	res, err := s.db.Exec(`UPDATE tasks SET topic = ? WHERE topic = ?;`, newName, oldName)
 	if err != nil {
 		return 0, err
 	}
@@ -275,7 +285,7 @@ func (s *Store) DeleteTopic(topic string) (int64, error) {
 			return 0, err
 		}
 	}
-	res, err := s.db.Exec(`DELETE FROM tasks WHERE project = ?;`, topic)
+	res, err := s.db.Exec(`DELETE FROM tasks WHERE topic = ?;`, topic)
 	if err != nil {
 		return 0, err
 	}
@@ -320,7 +330,7 @@ func (s *Store) ShiftDue(id int, days int) error {
 	return err
 }
 
-func (s *Store) UpdateTaskMetadata(id int, project, tags string, priority int, due, start sql.NullTime, recurring bool) error {
+func (s *Store) UpdateTaskMetadata(id int, topic, tags string, priority int, due, start sql.NullTime, recurring bool) error {
 	dueStr := sql.NullString{}
 	if due.Valid {
 		dueStr = sql.NullString{String: due.Time.UTC().Format(time.RFC3339), Valid: true}
@@ -333,8 +343,8 @@ func (s *Store) UpdateTaskMetadata(id int, project, tags string, priority int, d
 	if recurring {
 		rec = 1
 	}
-	_, err := s.db.Exec(`UPDATE tasks SET project = ?, tags = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
-		project, tags, priority, dueStr, startStr, rec, id)
+	_, err := s.db.Exec(`UPDATE tasks SET topic = ?, tags = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
+		topic, tags, priority, dueStr, startStr, rec, id)
 	return err
 }
 
@@ -432,8 +442,8 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 	}
 	for _, e := range entries {
 		task := e.Task
-		_, err := tx.Exec(`INSERT INTO tasks (title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			task.Title, boolToInt(task.Done), task.Project, task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
+		_, err := tx.Exec(`INSERT INTO tasks (title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			task.Title, boolToInt(task.Done), task.Topic, task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -462,12 +472,12 @@ func (s *Store) PurgeTrash(entries []TrashEntry) error {
 }
 
 func (s *Store) fetchTaskByID(id int) (Task, error) {
-	row := s.db.QueryRow(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
+	row := s.db.QueryRow(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
 	return scanTask(row)
 }
 
 func (s *Store) fetchDoneTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +498,7 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 }
 
 func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, project, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE project = ? ORDER BY id;`, topic)
+	rows, err := s.db.Query(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE topic = ? ORDER BY id;`, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +556,7 @@ func scanTask(scanner rowScanner) (Task, error) {
 	var dueStr, startStr, completedStr sql.NullString
 	var createdStr string
 
-	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Project, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Topic, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
 		return Task{}, err
 	}
 	t.Done = doneInt == 1
