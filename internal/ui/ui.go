@@ -2697,7 +2697,7 @@ func (m Model) startCommand() (tea.Model, tea.Cmd) {
 	m.input.SetValue("")
 	m.input.Placeholder = ""
 	m.input.Focus()
-	m.status = "Command: type 'help' and Enter, Esc to cancel"
+	m.status = "Command: type a command (tab to autocomplete), Enter to run, Esc to cancel"
 	return m, nil
 }
 
@@ -2716,6 +2716,10 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		m.mode = modeList
 		m.input.Blur()
 		m.status = "Command cancelled"
+		return m, nil
+	case "tab":
+		m.input.SetValue(completeCommand(m.input.Value()))
+		m.input.CursorEnd()
 		return m, nil
 	case m.cfg.Keys.Confirm, "enter":
 		cmd := strings.TrimSpace(m.input.Value())
@@ -2738,6 +2742,33 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		m.input, c = m.input.Update(msg)
 		return m, c
 	}
+}
+
+func completeCommand(input string) string {
+	cmd := strings.ToLower(strings.TrimSpace(input))
+	commands := []string{"agenda", "calendar"}
+	if cmd == "" {
+		return commands[0]
+	}
+	if cmd == commands[0] {
+		return commands[1]
+	}
+	if cmd == commands[1] {
+		return commands[0]
+	}
+	var matches []string
+	for _, c := range commands {
+		if strings.HasPrefix(c, cmd) {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	if len(matches) > 1 {
+		return matches[0]
+	}
+	return input
 }
 
 func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {

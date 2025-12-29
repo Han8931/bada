@@ -68,8 +68,9 @@ Options:
 
 ## Basic Features
 
+* Update help command
 * Agenda reporting config (+7 or +3)
-* **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
+* **Temporal Views:** A traditional list view plus a **Gantt view** to visualize deadlines.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * Integrate with Gorae / Bori
 
