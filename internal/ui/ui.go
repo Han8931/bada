@@ -32,6 +32,7 @@ const (
 	modeTrash
 	modeNote
 	modeReport
+	modeCalendar
 )
 
 type noteKind int
@@ -89,45 +90,48 @@ type metaState struct {
 }
 
 type Model struct {
-	store         *storage.Store
-	cfg           config.Config
-	tasks         []storage.Task
-	trash         []storage.TrashEntry
-	cursor        int
-	navBuf        string
-	trashCursor   int
-	mode          mode
-	report        string
-	recentLimit   int
-	input         textinput.Model
-	status        string
-	filterDone    string
-	sortMode      string
-	sortBuf       string
-	pendingSort   bool
-	currentTopic  string
-	searchQuery   string
-	styles        uiStyles
-	width         int
-	height        int
-	noteScroll    int
-	noteConfirm   bool
-	notePending   noteTarget
-	confirmDel    bool
-	pendingDel    *storage.Task
-	pendingBatch  []storage.Task
-	reportScroll  int
-	confirmTopic  bool
-	pendingTopic  string
-	trashSelected map[int]bool
-	trashConfirm  bool
-	trashPending  []storage.TrashEntry
-	selectedTasks map[int]bool
-	meta          *metaState
-	note          *noteState
-	renameID      int
-	renameTopic   string
-	renameIsTopic bool
+	store          *storage.Store
+	cfg            config.Config
+	tasks          []storage.Task
+	trash          []storage.TrashEntry
+	cursor         int
+	navBuf         string
+	trashCursor    int
+	mode           mode
+	report         string
+	recentLimit    int
+	input          textinput.Model
+	status         string
+	filterDone     string
+	sortMode       string
+	sortBuf        string
+	pendingSort    bool
+	currentTopic   string
+	searchQuery    string
+	styles         uiStyles
+	width          int
+	height         int
+	noteScroll     int
+	noteConfirm    bool
+	notePending    noteTarget
+	confirmDel     bool
+	pendingDel     *storage.Task
+	pendingBatch   []storage.Task
+	reportScroll   int
+	confirmTopic   bool
+	pendingTopic   string
+	trashSelected  map[int]bool
+	trashConfirm   bool
+	trashPending   []storage.TrashEntry
+	selectedTasks  map[int]bool
+	meta           *metaState
+	note           *noteState
+	renameID       int
+	renameTopic    string
+	renameIsTopic  bool
+	calendarMonth  time.Time
+	calendarDay    time.Time
+	calendarDetail bool
 }
 
 func Run(store *storage.Store, cfg config.Config) error {
@@ -183,6 +187,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeNote {
 			return m.updateNoteMode(msg.String())
+		}
+		if m.mode == modeCalendar {
+			return m.updateCalendarMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -494,6 +501,11 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
+	if m.mode == modeCalendar {
+		b.WriteString(m.renderCalendarView())
+		return m.fillView(b.String())
+	}
+
 	header := m.renderListBanner() + "\n"
 	gap := "\n"
 	divider := m.styles.Border.Render(m.ruleLine(m.taskListLineWidth())) + "\n"
@@ -702,6 +714,16 @@ func (m Model) enterReportView() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) enterCalendarView() (tea.Model, tea.Cmd) {
+	m.mode = modeCalendar
+	now := time.Now()
+	m.calendarMonth = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	m.calendarDay = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	m.calendarDetail = false
+	m.status = "Calendar view"
+	return m, nil
+}
+
 func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.trashConfirm {
 		switch key {
@@ -781,6 +803,49 @@ func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	return m, nil
+}
+
+func (m Model) updateCalendarMode(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		m.calendarDetail = !m.calendarDetail
+		return m, nil
+	case "esc", m.cfg.Keys.Quit, "q":
+		if m.calendarDetail {
+			m.calendarDetail = false
+			m.status = "Calendar view"
+			return m, nil
+		}
+		m.mode = modeList
+		m.status = "Calendar closed"
+		return m, nil
+	case "h", "left":
+		m.calendarDay = m.calendarDay.AddDate(0, 0, -1)
+		m.calendarMonth = time.Date(m.calendarDay.Year(), m.calendarDay.Month(), 1, 0, 0, 0, 0, m.calendarDay.Location())
+		return m, nil
+	case "l", "right":
+		m.calendarDay = m.calendarDay.AddDate(0, 0, 1)
+		m.calendarMonth = time.Date(m.calendarDay.Year(), m.calendarDay.Month(), 1, 0, 0, 0, 0, m.calendarDay.Location())
+		return m, nil
+	case "k", "up":
+		m.calendarDay = m.calendarDay.AddDate(0, 0, -7)
+		m.calendarMonth = time.Date(m.calendarDay.Year(), m.calendarDay.Month(), 1, 0, 0, 0, 0, m.calendarDay.Location())
+		return m, nil
+	case "j", "down":
+		m.calendarDay = m.calendarDay.AddDate(0, 0, 7)
+		m.calendarMonth = time.Date(m.calendarDay.Year(), m.calendarDay.Month(), 1, 0, 0, 0, 0, m.calendarDay.Location())
+		return m, nil
+	case "H":
+		m.calendarMonth = m.calendarMonth.AddDate(0, -1, 0)
+		m.calendarDay = time.Date(m.calendarMonth.Year(), m.calendarMonth.Month(), 1, 0, 0, 0, 0, m.calendarMonth.Location())
+		return m, nil
+	case "L":
+		m.calendarMonth = m.calendarMonth.AddDate(0, 1, 0)
+		m.calendarDay = time.Date(m.calendarMonth.Year(), m.calendarMonth.Month(), 1, 0, 0, 0, 0, m.calendarMonth.Location())
+		return m, nil
+	default:
+		return m, nil
+	}
 }
 
 func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
@@ -961,6 +1026,177 @@ func (m Model) selectedTaskList() []storage.Task {
 		}
 	}
 	return selected
+}
+
+func (m Model) renderCalendarView() string {
+	if m.calendarDetail {
+		return m.renderCalendarDetail()
+	}
+	return m.renderCalendarMonth()
+}
+
+func (m Model) renderCalendarMonth() string {
+	var b strings.Builder
+	b.WriteString(m.renderListBanner())
+	b.WriteString("\n\n")
+	monthTitle := m.calendarMonth.Format("January 2006")
+	b.WriteString(m.styles.Accent.Render("Calendar • " + monthTitle))
+	b.WriteString("\n\n")
+	b.WriteString(m.renderCalendarGrid())
+	b.WriteString("\n\n")
+	b.WriteString(m.renderCalendarInfo())
+	b.WriteString("\n")
+	b.WriteString(m.styles.Muted.Render("h/l day • j/k week • H/L month • enter day • esc/q close"))
+	return b.String()
+}
+
+func (m Model) renderCalendarDetail() string {
+	var b strings.Builder
+	b.WriteString(m.renderListBanner())
+	b.WriteString("\n\n")
+	title := fmt.Sprintf("Calendar • %s", m.calendarDay.Format("Mon, Jan 2, 2006"))
+	b.WriteString(m.styles.Accent.Render(title))
+	b.WriteString("\n\n")
+	b.WriteString(m.renderCalendarDayList())
+	b.WriteString("\n\n")
+	b.WriteString(m.styles.Muted.Render("enter back • h/l day • j/k week • esc/q close"))
+	return b.String()
+}
+
+func (m Model) renderCalendarGrid() string {
+	weeks := calendarWeeks(m.calendarMonth)
+	cellWidth := 12
+	dayNames := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+	var b strings.Builder
+	for _, name := range dayNames {
+		b.WriteString(padRight(name, cellWidth))
+	}
+	b.WriteString("\n")
+	for _, week := range weeks {
+		for _, day := range week {
+			b.WriteString(m.renderCalendarCell(day, cellWidth))
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) renderCalendarCell(day time.Time, width int) string {
+	inMonth := day.Month() == m.calendarMonth.Month()
+	count := m.tasksForDayCount(day)
+	prefix := " "
+	if count > 0 {
+		prefix = "*"
+	}
+	label := fmt.Sprintf("%s%2d", prefix, day.Day())
+	label = padRight(label, width)
+	style := m.styles.Muted
+	if inMonth {
+		style = m.styles.Border
+	}
+	if isSameDate(day, time.Now()) {
+		style = m.styles.Warning
+	}
+	if isSameDate(day, m.calendarDay) {
+		style = m.styles.Selection
+	}
+	return style.Render(label)
+}
+
+func (m Model) renderCalendarDayList() string {
+	tasks := m.tasksForDay(m.calendarDay)
+	if len(tasks) == 0 {
+		return m.styles.Muted.Render("(no tasks)")
+	}
+	var b strings.Builder
+	for _, t := range tasks {
+		due := "no due"
+		if t.Due.Valid {
+			due = formatDate(t.Due)
+		}
+		line := fmt.Sprintf("  • #%d %-40s  %s", t.ID, truncateText(t.Title, 40), due)
+		if rec := recurrenceSummary(t); rec != "" {
+			line += " [" + rec + "]"
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) renderCalendarInfo() string {
+	day := m.calendarDay
+	tasks := m.tasksForDay(day)
+	label := fmt.Sprintf("%s • tasks: %d", day.Format("Mon, Jan 2, 2006"), len(tasks))
+	if len(tasks) == 0 {
+		return m.styles.Muted.Render(label)
+	}
+	var b strings.Builder
+	b.WriteString(m.styles.Border.Render(label))
+	b.WriteString("\n")
+	for _, t := range tasks {
+		b.WriteString("  • ")
+		b.WriteString(truncateText(t.Title, 40))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) tasksForDayCount(day time.Time) int {
+	return len(m.tasksForDay(day))
+}
+
+func (m Model) tasksForDay(day time.Time) []storage.Task {
+	dayKey := dateKey(day, m.calendarDay.Location())
+	var list []storage.Task
+	for _, t := range m.tasks {
+		if t.Done {
+			continue
+		}
+		if t.Due.Valid && dateKey(t.Due.Time, m.calendarDay.Location()) == dayKey {
+			list = append(list, t)
+			continue
+		}
+		if next, ok := nextRecurrenceDate(t); ok && dateKey(next, m.calendarDay.Location()) == dayKey {
+			list = append(list, t)
+		}
+	}
+	return list
+}
+
+func calendarWeeks(month time.Time) [][]time.Time {
+	month = time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, month.Location())
+	start := startOfWeek(month, time.Monday)
+	weeks := make([][]time.Time, 0, 6)
+	cursor := start
+	for i := 0; i < 6; i++ {
+		week := make([]time.Time, 0, 7)
+		for j := 0; j < 7; j++ {
+			week = append(week, cursor)
+			cursor = cursor.AddDate(0, 0, 1)
+		}
+		weeks = append(weeks, week)
+	}
+	return weeks
+}
+
+func padRight(text string, width int) string {
+	if len(text) >= width {
+		return text
+	}
+	return text + strings.Repeat(" ", width-len(text))
+}
+
+func isSameDate(a, b time.Time) bool {
+	return dateKey(a, b.Location()) == dateKey(b, b.Location())
+}
+
+func dateKey(t time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.Local
+	}
+	tt := t.In(loc)
+	return fmt.Sprintf("%04d-%02d-%02d", tt.Year(), tt.Month(), tt.Day())
 }
 
 func (m Model) renderReportHeader() string {
@@ -2486,9 +2722,11 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		cmdLower := strings.ToLower(cmd)
 		switch cmdLower {
 		case "help":
-			m.status = "Commands: help | sort (s then d/p/t/a/s) | rename (r) | priority +/- | due ]/[ | notes (enter view, e edit)"
+			m.status = "Commands: help | agenda | calendar | sort (s then d/p/t/a/s) | rename (r) | priority +/- | due ]/[ | notes (enter view, e edit)"
 		case "agenda":
 			return m.enterReportView()
+		case "calendar":
+			return m.enterCalendarView()
 		default:
 			m.status = fmt.Sprintf("unknown command: %s", cmd)
 		}
