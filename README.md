@@ -22,6 +22,25 @@
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview (works for tasks or topic rows; not available for RecentlyAdded/RecentlyDone).
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 
+## Recurrence Syntax
+
+You can set recurrence in the metadata editor using the `Recurrence` and `Interval` fields.
+
+Examples:
+
+- `every day`
+- `every 3 days`
+- `every 2 weeks`
+- `every 2 weeks on Mon`
+- `every month`
+- `every month on Fri`
+- `daily`, `weekly`, `monthly` (aliases)
+
+Notes:
+- Weekday names accept short and long forms: `Mon`/`Monday`, `Tue`/`Tuesday`, etc.
+- If `Recurrence` is empty but `Interval` is set, it is treated as `every N days`.
+- The UI shows a “Next: YYYY-MM-DD” preview for recurring tasks.
+
 ## Theme
 
 Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to customize colors for headings, accents, status bar, and selection highlight.
