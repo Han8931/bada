@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,17 +75,16 @@ type uiStyles struct {
 }
 
 type metaState struct {
-	taskID    int
-	title     string
-	topic     string
-	tags      string
-	priority  string
-	due       string
-	start     string
-	recurring string
-	rule      string
-	interval  string
-	index     int
+	taskID   int
+	title    string
+	topic    string
+	tags     string
+	priority string
+	due      string
+	start    string
+	rule     string
+	interval string
+	index    int
 }
 
 type Model struct {
@@ -282,8 +282,9 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "h", "left":
 		if m.currentTopic != "" {
+			prevTopic := m.currentTopic
 			m.currentTopic = ""
-			m.cursor = clampCursor(0, len(m.visibleItems()))
+			m.cursor = clampCursor(m.findTopicIndex(prevTopic), len(m.visibleItems()))
 			m.status = "Back to root"
 		}
 	case m.cfg.Keys.Down, "down":
@@ -402,11 +403,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		if task.Start.Valid {
 			info += " • start:" + task.Start.Time.Format("2006-01-02")
 		}
-		if task.RecurrenceRule != "" && task.RecurrenceRule != "none" {
-			info += fmt.Sprintf(" • recur:%s", task.RecurrenceRule)
-			if task.RecurrenceInterval > 0 {
-				info += fmt.Sprintf("(%dd)", task.RecurrenceInterval)
-			}
+		if recSummary := recurrenceSummary(task); recSummary != "" {
+			info += " • recur:" + recSummary
 		}
 		m.status = info
 	case m.cfg.Keys.Edit:
@@ -460,51 +458,80 @@ func (m Model) View() string {
 		b.WriteString(m.styles.Accent.Render("Reminder Report"))
 		b.WriteString("\n\n")
 		b.WriteString(m.report)
-	} else {
-		b.WriteString(m.renderListBanner())
 		b.WriteString("\n\n")
-		b.WriteString(m.renderTaskList())
+		return m.fillView(b.String())
 	}
 
-	b.WriteString("\n")
-	b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
-	b.WriteString("\n")
+	header := m.renderListBanner() + "\n"
+	gap := "\n"
+	divider := m.styles.Border.Render(m.ruleLine(m.taskListLineWidth())) + "\n"
+	footer := m.renderFooterPanel()
+	tail := ""
 
+	listMax := 0
+	if m.height > 0 {
+		available := m.height - 1
+		listMax = available - countLines(header) - countLines(gap) - countLines(divider) - countLines(footer) - countLines(tail)
+		if listMax < 0 {
+			listMax = 0
+		}
+	}
+
+	b.WriteString(header)
+	if m.height > 0 {
+		b.WriteString(m.renderTaskListWithHeight(listMax))
+	} else {
+		b.WriteString(m.renderTaskList())
+	}
+	b.WriteString(gap)
+	b.WriteString(divider)
+	b.WriteString(footer)
+	b.WriteString(tail)
+	return m.fillView(b.String())
+}
+
+func (m Model) renderFooterPanel() string {
+	var b strings.Builder
 	if m.meta != nil {
-		b.WriteString(m.styles.Heading.Render("Metadata editor (tab/shift+tab or h/j/k/l to move, enter to save/next, esc to cancel)"))
-		b.WriteString("\n\n")
 		b.WriteString(m.renderMetaBox())
 		b.WriteString("\n")
 		b.WriteString(m.styles.Muted.Render("Field: ") + m.styles.Accent.Render(m.currentMetaLabel()))
 		b.WriteString("\n")
 		b.WriteString(m.input.View())
-	} else if m.mode == modeReport {
-		b.WriteString(m.styles.Muted.Render("Press enter/esc/q to close, : for commands"))
-	} else if m.mode == modeTrash {
+		b.WriteString("\n\n")
+		b.WriteString(m.styles.Heading.Render("Metadata editor (up/down or tab/shift+tab to move, enter to save/next, esc to cancel)"))
+		return b.String()
+	}
+	switch m.mode {
+	case modeReport:
+		return m.styles.Muted.Render("Press enter/esc/q to close, : for commands")
+	case modeTrash:
 		b.WriteString(m.styles.Heading.Render("Trash (space to select, u to restore, esc to exit)"))
 		b.WriteString("\n\n")
 		b.WriteString(m.renderTrashList())
-	} else if m.mode == modeAdd {
+		return b.String()
+	case modeAdd:
 		b.WriteString(m.styles.Heading.Render("Add task: "))
 		b.WriteString(m.input.View())
-	} else if m.mode == modeRename {
+		return b.String()
+	case modeRename:
 		b.WriteString(m.styles.Heading.Render("Rename task: Enter to save, Esc to cancel"))
 		b.WriteString("\n\n")
 		b.WriteString(m.styles.Muted.Render("Current: ") + m.currentTaskTitle() + "\n")
 		b.WriteString(m.styles.Muted.Render("New: "))
 		b.WriteString(m.input.View())
-	} else if m.mode == modeCommand {
+		return b.String()
+	case modeCommand:
 		b.WriteString(m.styles.Heading.Render(":"))
 		b.WriteString(m.input.View())
-	} else if m.mode == modeSearch {
+		return b.String()
+	case modeSearch:
 		b.WriteString(m.styles.Heading.Render("Search: "))
 		b.WriteString(m.input.View())
-	} else {
-		b.WriteString(m.renderMetadataPanel())
+		return b.String()
+	default:
+		return m.renderMetadataPanel()
 	}
-
-	b.WriteString("\n\n")
-	return m.fillView(b.String())
 }
 
 func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
@@ -845,23 +872,31 @@ func renderHelp(k config.Keymap) string {
 }
 
 func (m Model) renderTaskList() string {
-	var b strings.Builder
+	return m.renderTaskListWithHeight(-1)
+}
 
-	items := m.visibleItems()
-	if m.searchActive() {
-		b.WriteString(m.styles.Accent.Render(fmt.Sprintf("Search: %q (%d result(s))", m.searchQuery, len(items))))
-		b.WriteString("\n")
-	}
-
+func (m Model) taskListLineWidth() int {
 	header := "      Title                                   Due"
 	lineWidth := len(header)
 	if m.width > lineWidth {
 		lineWidth = m.width
 	}
-	b.WriteString(m.styles.Border.Render(header))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Border.Render(m.ruleLine(lineWidth)))
-	b.WriteString("\n")
+	return lineWidth
+}
+
+func (m Model) renderTaskListWithHeight(maxLines int) string {
+	items := m.visibleItems()
+	header := "      Title                                   Due"
+	lineWidth := m.taskListLineWidth()
+
+	lines := make([]string, 0)
+	if m.searchActive() {
+		lines = append(lines, m.styles.Accent.Render(fmt.Sprintf("Search: %q (%d result(s))", m.searchQuery, len(items))))
+	}
+	lines = append(lines, m.styles.Border.Render(header))
+	lines = append(lines, m.styles.Border.Render(m.ruleLine(lineWidth)))
+
+	itemLines := make([]string, 0, len(items))
 	for i, it := range items {
 		switch it.kind {
 		case itemTopic:
@@ -879,8 +914,7 @@ func (m Model) renderTaskList() string {
 			} else {
 				line = m.styles.Accent.Render(line)
 			}
-			b.WriteString(line)
-			b.WriteString("\n")
+			itemLines = append(itemLines, line)
 		case itemTask:
 			title := it.task.Title
 			if len(title) > 40 {
@@ -916,15 +950,45 @@ func (m Model) renderTaskList() string {
 			} else if it.task.Done {
 				body = m.styles.Done.Render(body)
 			}
-			b.WriteString(body)
-			b.WriteString("\n")
+			itemLines = append(itemLines, body)
 		}
 	}
 	if len(items) == 0 {
-		b.WriteString(m.styles.Muted.Render("(no tasks)"))
-		b.WriteString("\n")
+		itemLines = append(itemLines, m.styles.Muted.Render("(no tasks)"))
 	}
-	return b.String()
+
+	if maxLines >= 0 {
+		available := maxLines - len(lines)
+		if available < 0 {
+			available = 0
+		}
+		if available == 0 {
+			itemLines = nil
+		} else if len(itemLines) > available {
+			start := 0
+			if len(items) > 0 && m.cursor >= 0 {
+				cur := clampCursor(m.cursor, len(items))
+				if cur >= start+available {
+					start = cur - available + 1
+				}
+				if start+available > len(itemLines) {
+					start = len(itemLines) - available
+				}
+				if start < 0 {
+					start = 0
+				}
+			}
+			itemLines = itemLines[start : start+available]
+		}
+		lines = append(lines, itemLines...)
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	lines = append(lines, itemLines...)
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderTrashList() string {
@@ -1223,23 +1287,23 @@ func (t noteTarget) matches(other noteTarget) bool {
 
 func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
-		taskID:    t.ID,
-		title:     t.Title,
-		topic:     strings.Join(t.Topics, ","),
-		tags:      t.Tags,
-		priority:  fmt.Sprintf("%d", t.Priority),
-		due:       formatDate(t.Due),
-		start:     defaultStart(t),
-		recurring: boolToYN(t.Recurring),
-		rule:      t.RecurrenceRule,
-		interval:  intervalString(t.RecurrenceInterval),
-		index:     0,
+		taskID:   t.ID,
+		title:    t.Title,
+		topic:    strings.Join(t.Topics, ","),
+		tags:     t.Tags,
+		priority: fmt.Sprintf("%d", t.Priority),
+		due:      formatDate(t.Due),
+		start:    defaultStart(t),
+		rule:     t.RecurrenceRule,
+		interval: intervalString(t.RecurrenceInterval),
+		index:    0,
 	}
 	m.input.SetValue(m.meta.currentValue())
+	m.input.CursorEnd()
 	m.input.Placeholder = m.meta.currentLabel()
 	m.input.Focus()
 	m.mode = modeMetadata
-	m.status = "Edit metadata: tab/hjkl to move, enter to save/next, esc to cancel"
+	m.status = "Edit metadata: up/down or tab/shift+tab to move, enter to save/next, esc to cancel"
 	return m, nil
 }
 
@@ -1261,23 +1325,25 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		m.input.Blur()
 		m.status = "Metadata saved"
 		return m, nil
-	case "tab", "right", "down":
+	case "tab", "down":
 		if m.meta == nil {
 			return m, nil
 		}
 		m.meta.setCurrentValue(m.input.Value())
 		m.meta.index = wrapIndex(m.meta.index+1, len(metaFields()))
 		m.input.SetValue(m.meta.currentValue())
+		m.input.CursorEnd()
 		m.input.Placeholder = m.meta.currentLabel()
 		m.status = m.metaPrompt()
 		return m, nil
-	case "shift+tab", "left", "up":
+	case "shift+tab", "up":
 		if m.meta == nil {
 			return m, nil
 		}
 		m.meta.setCurrentValue(m.input.Value())
 		m.meta.index = wrapIndex(m.meta.index-1, len(metaFields()))
 		m.input.SetValue(m.meta.currentValue())
+		m.input.CursorEnd()
 		m.input.Placeholder = m.meta.currentLabel()
 		m.status = m.metaPrompt()
 		return m, nil
@@ -1301,6 +1367,7 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		}
 		m.meta.index++
 		m.input.SetValue(m.meta.currentValue())
+		m.input.CursorEnd()
 		m.input.Placeholder = m.meta.currentLabel()
 		m.status = m.metaPrompt()
 		return m, nil
@@ -1360,14 +1427,21 @@ func (m *Model) applyMetaInputSanitizer() {
 		m.input.SetValue(filterRule(m.input.Value()))
 	case 7: // interval
 		m.input.SetValue(filterDigits(m.input.Value()))
-	case 8: // recurring flag
-		m.input.SetValue(filterYN(m.input.Value()))
 	}
 	m.meta.setCurrentValue(m.input.Value())
 }
 
 func metaFields() []string {
-	return []string{"title", "topics (csv)", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurrence", "interval", "recurring (y/n)"}
+	return []string{
+		"Title",
+		"Topics (CSV)",
+		"Tags",
+		"Priority",
+		"Due Date (YYYY-MM-DD)",
+		"Start Date (YYYY-MM-DD)",
+		"Recurrence",
+		"Interval",
+	}
 }
 
 func (ms metaState) currentLabel() string {
@@ -1392,8 +1466,6 @@ func (ms metaState) currentValue() string {
 		return ms.rule
 	case 7:
 		return ms.interval
-	case 8:
-		return ms.recurring
 	default:
 		return ""
 	}
@@ -1417,8 +1489,6 @@ func (ms *metaState) setCurrentValue(v string) {
 		ms.rule = v
 	case 7:
 		ms.interval = v
-	case 8:
-		ms.recurring = v
 	}
 }
 
@@ -1426,7 +1496,7 @@ func (m Model) metaPrompt() string {
 	if m.meta == nil {
 		return ""
 	}
-	return fmt.Sprintf("Editing %s (field %d of %d). Enter to advance, Esc to cancel, tab/hjkl to move.",
+	return fmt.Sprintf("Editing %s (field %d of %d). Enter to advance, Esc to cancel, up/down or tab/shift+tab to move.",
 		m.meta.currentLabel(), m.meta.index+1, len(metaFields()))
 }
 
@@ -1470,12 +1540,23 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		m.status = fmt.Sprintf("start date invalid: %v", err)
 		return m, nil
 	}
-	recurring := parseYN(m.meta.recurring)
-	rule := strings.TrimSpace(strings.ToLower(m.meta.rule))
-	if rule == "" {
-		rule = "none"
-	}
+	ruleInput := strings.TrimSpace(m.meta.rule)
+	rule := strings.TrimSpace(ruleInput)
 	interval := parseInterval(m.meta.interval)
+	recurring := rule != "" || interval > 0
+	if spec, ok := parseRecurrenceSpec(ruleInput); ok {
+		rule = spec.label
+		interval = 0
+		recurring = true
+	}
+	if strings.TrimSpace(rule) == "" || strings.EqualFold(rule, "none") {
+		if interval > 0 {
+			rule = fmt.Sprintf("every %d days", interval)
+			interval = 0
+		} else {
+			rule = "none"
+		}
+	}
 
 	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, priority, due, start, recurring); err != nil {
 		return m, err
@@ -1548,18 +1629,6 @@ func defaultStart(t storage.Task) string {
 	return formatDate(sql.NullTime{Time: t.CreatedAt, Valid: true})
 }
 
-func parseYN(v string) bool {
-	v = strings.ToLower(strings.TrimSpace(v))
-	return v == "y" || v == "yes" || v == "true" || v == "1"
-}
-
-func boolToYN(b bool) string {
-	if b {
-		return "y"
-	}
-	return "n"
-}
-
 func (m Model) currentMetaLabel() string {
 	if m.meta == nil {
 		return ""
@@ -1572,6 +1641,12 @@ func (m Model) renderMetaBox() string {
 		return ""
 	}
 	fields := metaFields()
+	labelWidth := 0
+	for _, name := range fields {
+		if len(name) > labelWidth {
+			labelWidth = len(name)
+		}
+	}
 	values := []string{
 		m.meta.title,
 		m.meta.topic,
@@ -1581,7 +1656,6 @@ func (m Model) renderMetaBox() string {
 		m.meta.start,
 		m.meta.rule,
 		m.meta.interval,
-		m.meta.recurring,
 	}
 	var b strings.Builder
 	for i, name := range fields {
@@ -1590,7 +1664,8 @@ func (m Model) renderMetaBox() string {
 		if strings.TrimSpace(val) == "" {
 			val = "(empty)"
 		}
-		line := fmt.Sprintf("%s %-18s : %s", prefix, name, val)
+		label := fmt.Sprintf("%-*s", labelWidth, name)
+		line := fmt.Sprintf("%s %s : %s", prefix, m.styles.Heading.Render(label), val)
 		if i == m.meta.index {
 			line = m.styles.Selection.Render(line)
 		}
@@ -1647,6 +1722,12 @@ func (m *Model) refreshReport() {
 	b.WriteString(m.styles.Muted.Render(now.Format("Monday, Jan 2, 2006")))
 	b.WriteString("\n")
 	writeDivider()
+	if len(upcoming) > 0 {
+		summary := fmt.Sprintf("Upcoming: %d task(s) in next 3 days", len(upcoming))
+		b.WriteString(m.styles.Warning.Render("  " + summary))
+		b.WriteString("\n")
+		writeDivider()
+	}
 
 	if len(overdue) == 0 && len(todayList) == 0 && len(upcoming) == 0 {
 		b.WriteString(m.styles.Success.Render("  All clear. No due tasks."))
@@ -1676,19 +1757,26 @@ func (m *Model) refreshReport() {
 		if len(upcoming) > 0 {
 			writeSection("Upcoming (3d)", upcoming, m.styles.Muted)
 		}
-		if len(recurring) > 0 {
-			writeSectionHeader("Recurring Tasks", len(recurring))
-			for _, t := range recurring {
-				due := "no due"
-				if t.Due.Valid {
-					due = fmt.Sprintf("due %s", formatDate(t.Due))
-				}
-				line := fmt.Sprintf("  • #%d %-40s  [%s] %s", t.ID, truncateText(t.Title, 40), recurrenceRuleLabel(t), due)
-				b.WriteString(m.styles.Warning.Render(line))
-				b.WriteString("\n")
+	}
+	if len(recurring) > 0 {
+		writeSectionHeader("Recurring Tasks", len(recurring))
+		for _, t := range recurring {
+			due := "no due"
+			if t.Due.Valid {
+				due = fmt.Sprintf("due %s", formatDate(t.Due))
 			}
+			next := ""
+			if nextDate, ok := nextRecurrenceDate(t); ok {
+				next = fmt.Sprintf("next %s", nextDate.Format("2006-01-02"))
+			}
+			line := fmt.Sprintf("  • #%d %-40s  [%s] %s", t.ID, truncateText(t.Title, 40), recurrenceRuleLabel(t), due)
+			if next != "" {
+				line += " • " + next
+			}
+			b.WriteString(m.styles.Warning.Render(line))
 			b.WriteString("\n")
 		}
+		b.WriteString("\n")
 	}
 	writeDivider()
 
@@ -1733,21 +1821,49 @@ func wrapIndex(idx, n int) int {
 
 func (m Model) renderMetadataPanel() string {
 	task, ok := m.currentTask()
-	if !ok {
-		return m.styles.Muted.Render("No task selected")
+	type row struct {
+		label string
+		value string
 	}
+	rows := []row{
+		{label: "Title", value: ""},
+		{label: "Topics", value: ""},
+		{label: "Tags", value: ""},
+		{label: "Priority", value: ""},
+		{label: "Start", value: ""},
+		{label: "Recurrence", value: ""},
+	}
+	if ok {
+		rows[0].value = task.Title
+		rows[1].value = emptyPlaceholder(strings.Join(task.Topics, ", "))
+		rows[2].value = emptyPlaceholder(task.Tags)
+		rows[3].value = fmt.Sprintf("%d", task.Priority)
+		rows[4].value = defaultStart(task)
+		if recSummary := recurrenceSummary(task); recSummary != "" {
+			if next, ok := nextRecurrenceDate(task); ok {
+				rows[5].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
+			} else {
+				rows[5].value = recSummary
+			}
+		} else {
+			rows[5].value = "off"
+		}
+	} else {
+		for i := range rows {
+			rows[i].value = "(empty)"
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Title     : "), task.Title))
-	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Topics    : "), emptyPlaceholder(strings.Join(task.Topics, ", "))))
-	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Tags      : "), emptyPlaceholder(task.Tags)))
-	b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Priority  : "), task.Priority))
-	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Start     : "), defaultStart(task)))
-	b.WriteString(fmt.Sprintf("%s%t\n", m.styles.Muted.Render("Recurring : "), task.Recurring))
-	if task.RecurrenceRule != "" && task.RecurrenceRule != "none" {
-		b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Rule      : "), task.RecurrenceRule))
+	labelWidth := 0
+	for _, r := range rows {
+		if len(r.label) > labelWidth {
+			labelWidth = len(r.label)
+		}
 	}
-	if task.RecurrenceInterval > 0 {
-		b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Interval  : "), task.RecurrenceInterval))
+	for _, r := range rows {
+		label := fmt.Sprintf("%-*s", labelWidth, r.label)
+		b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render(label+" : "), r.value))
 	}
 	return b.String()
 }
@@ -2469,18 +2585,27 @@ func overdueDetail(t storage.Task) string {
 	return fmt.Sprintf(" (overdue %dd)", days)
 }
 
+type recurrenceSpec struct {
+	every   int
+	unit    string
+	weekday *time.Weekday
+	label   string
+}
+
 func recurrenceBadge(t storage.Task) string {
 	if !isRecurringTask(t) {
 		return ""
 	}
-	label := recurrenceRuleLabel(t)
-	if t.RecurrenceInterval > 0 {
-		return fmt.Sprintf("[recur %s/%dd]", label, t.RecurrenceInterval)
+	if summary := recurrenceSummary(t); summary != "" {
+		return fmt.Sprintf("[recur %s]", summary)
 	}
-	return fmt.Sprintf("[recur %s]", label)
+	return "[recur]"
 }
 
 func recurrenceRuleLabel(t storage.Task) string {
+	if spec, ok := parseRecurrenceSpec(t.RecurrenceRule); ok {
+		return spec.label
+	}
 	rule := strings.TrimSpace(t.RecurrenceRule)
 	if strings.ToLower(rule) == "none" {
 		rule = ""
@@ -2491,9 +2616,275 @@ func recurrenceRuleLabel(t storage.Task) string {
 	return rule
 }
 
+func recurrenceSummary(t storage.Task) string {
+	if !isRecurringTask(t) {
+		return ""
+	}
+	if spec, ok := parseRecurrenceSpec(t.RecurrenceRule); ok {
+		return spec.label
+	}
+	rule := strings.TrimSpace(t.RecurrenceRule)
+	if rule == "" || strings.EqualFold(rule, "none") {
+		rule = "custom"
+	}
+	if t.RecurrenceInterval > 0 {
+		return fmt.Sprintf("%s/%dd", rule, t.RecurrenceInterval)
+	}
+	return rule
+}
+
 func isRecurringTask(t storage.Task) bool {
 	rule := strings.ToLower(strings.TrimSpace(t.RecurrenceRule))
 	return t.Recurring || (rule != "" && rule != "none")
+}
+
+func parseRecurrenceSpec(input string) (recurrenceSpec, bool) {
+	raw := strings.TrimSpace(input)
+	if raw == "" {
+		return recurrenceSpec{}, false
+	}
+	everyRe := regexp.MustCompile(`(?i)^every\s*(\d+)?\s*(day|days|week|weeks|month|months)(?:\s+on\s+([a-z]+))?$`)
+	dailyRe := regexp.MustCompile(`(?i)^(daily|weekly|monthly)(?:\s+on\s+([a-z]+))?$`)
+	if m := everyRe.FindStringSubmatch(raw); m != nil {
+		count := 1
+		if strings.TrimSpace(m[1]) != "" {
+			if v, err := strconv.Atoi(m[1]); err == nil && v > 0 {
+				count = v
+			}
+		}
+		unit := strings.ToLower(m[2])
+		unit = strings.TrimSuffix(unit, "s")
+		var weekday *time.Weekday
+		if strings.TrimSpace(m[3]) != "" {
+			if wd, ok := parseWeekday(m[3]); ok {
+				weekday = &wd
+			}
+		}
+		label := formatRecurrenceLabel(count, unit, weekday)
+		return recurrenceSpec{every: count, unit: unit, weekday: weekday, label: label}, true
+	}
+	if m := dailyRe.FindStringSubmatch(raw); m != nil {
+		unit := strings.ToLower(m[1])
+		switch unit {
+		case "daily":
+			unit = "day"
+		case "weekly":
+			unit = "week"
+		case "monthly":
+			unit = "month"
+		}
+		var weekday *time.Weekday
+		if strings.TrimSpace(m[2]) != "" {
+			if wd, ok := parseWeekday(m[2]); ok {
+				weekday = &wd
+			}
+		}
+		label := formatRecurrenceLabel(1, unit, weekday)
+		return recurrenceSpec{every: 1, unit: unit, weekday: weekday, label: label}, true
+	}
+	return recurrenceSpec{}, false
+}
+
+func formatRecurrenceLabel(every int, unit string, weekday *time.Weekday) string {
+	unitLabel := unit
+	if every == 1 {
+		unitLabel = unit
+	} else {
+		unitLabel = unit + "s"
+	}
+	base := ""
+	if every == 1 {
+		base = "every " + unitLabel
+	} else {
+		base = fmt.Sprintf("every %d %s", every, unitLabel)
+	}
+	if weekday != nil {
+		base += " on " + weekdayShort(*weekday)
+	}
+	return base
+}
+
+func parseWeekday(input string) (time.Weekday, bool) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "mon", "monday":
+		return time.Monday, true
+	case "tue", "tues", "tuesday":
+		return time.Tuesday, true
+	case "wed", "wednesday":
+		return time.Wednesday, true
+	case "thu", "thur", "thurs", "thursday":
+		return time.Thursday, true
+	case "fri", "friday":
+		return time.Friday, true
+	case "sat", "saturday":
+		return time.Saturday, true
+	case "sun", "sunday":
+		return time.Sunday, true
+	default:
+		return time.Sunday, false
+	}
+}
+
+func weekdayShort(day time.Weekday) string {
+	switch day {
+	case time.Monday:
+		return "Mon"
+	case time.Tuesday:
+		return "Tue"
+	case time.Wednesday:
+		return "Wed"
+	case time.Thursday:
+		return "Thu"
+	case time.Friday:
+		return "Fri"
+	case time.Saturday:
+		return "Sat"
+	default:
+		return "Sun"
+	}
+}
+
+func nextRecurrenceDate(t storage.Task) (time.Time, bool) {
+	if !isRecurringTask(t) {
+		return time.Time{}, false
+	}
+	base, ok := recurrenceBaseDate(t)
+	if !ok {
+		return time.Time{}, false
+	}
+	now := time.Now().In(base.Location())
+	rule := strings.TrimSpace(t.RecurrenceRule)
+	useSpec := strings.HasPrefix(strings.ToLower(rule), "every")
+	if spec, ok := parseRecurrenceSpec(rule); ok && (useSpec || t.RecurrenceInterval == 0) {
+		return nextFromSpec(base, now, spec), true
+	}
+	if t.RecurrenceInterval > 0 {
+		return nextByDays(base, now, t.RecurrenceInterval), true
+	}
+	if spec, ok := parseRecurrenceSpec(rule); ok {
+		return nextFromSpec(base, now, spec), true
+	}
+	return time.Time{}, false
+}
+
+func recurrenceBaseDate(t storage.Task) (time.Time, bool) {
+	switch {
+	case t.Due.Valid:
+		return normalizeDate(t.Due.Time), true
+	case t.Start.Valid:
+		return normalizeDate(t.Start.Time), true
+	default:
+		if t.CreatedAt.IsZero() {
+			return time.Time{}, false
+		}
+		return normalizeDate(t.CreatedAt), true
+	}
+}
+
+func normalizeDate(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+func nextByDays(base, now time.Time, interval int) time.Time {
+	base = normalizeDate(base)
+	now = normalizeDate(now)
+	if interval <= 0 {
+		return base
+	}
+	if base.After(now) {
+		return base
+	}
+	diffDays := int(now.Sub(base).Hours() / 24)
+	steps := diffDays/interval + 1
+	return base.AddDate(0, 0, steps*interval)
+}
+
+func nextFromSpec(base, now time.Time, spec recurrenceSpec) time.Time {
+	switch spec.unit {
+	case "day":
+		return nextByDays(base, now, spec.every)
+	case "week":
+		if spec.weekday != nil {
+			return nextWeeklyByWeekday(base, now, spec.every, *spec.weekday)
+		}
+		return nextByDays(base, now, spec.every*7)
+	case "month":
+		if spec.weekday != nil {
+			return nextMonthlyByWeekday(base, now, spec.every, *spec.weekday)
+		}
+		return nextByMonths(base, now, spec.every)
+	default:
+		return base
+	}
+}
+
+func nextWeeklyByWeekday(base, now time.Time, every int, weekday time.Weekday) time.Time {
+	if every <= 0 {
+		every = 1
+	}
+	base = normalizeDate(base)
+	now = normalizeDate(now)
+	weekStart := startOfWeek(base, time.Monday)
+	nowWeekStart := startOfWeek(now, time.Monday)
+	weeksSince := int(nowWeekStart.Sub(weekStart).Hours() / 24 / 7)
+	if weeksSince < 0 {
+		weeksSince = 0
+	}
+	adjust := weeksSince % every
+	if adjust != 0 {
+		weeksSince += every - adjust
+	}
+	for {
+		candidateWeek := weekStart.AddDate(0, 0, weeksSince*7)
+		candidate := candidateWeek.AddDate(0, 0, weekdayOffset(time.Monday, weekday))
+		if candidate.After(now) {
+			return candidate
+		}
+		weeksSince += every
+	}
+}
+
+func nextByMonths(base, now time.Time, every int) time.Time {
+	if every <= 0 {
+		every = 1
+	}
+	base = normalizeDate(base)
+	now = normalizeDate(now)
+	candidate := base
+	for !candidate.After(now) {
+		candidate = candidate.AddDate(0, every, 0)
+	}
+	return candidate
+}
+
+func nextMonthlyByWeekday(base, now time.Time, every int, weekday time.Weekday) time.Time {
+	if every <= 0 {
+		every = 1
+	}
+	base = normalizeDate(base)
+	now = normalizeDate(now)
+	candidate := firstWeekdayOfMonth(base, weekday)
+	for !candidate.After(now) {
+		base = base.AddDate(0, every, 0)
+		candidate = firstWeekdayOfMonth(base, weekday)
+	}
+	return candidate
+}
+
+func firstWeekdayOfMonth(date time.Time, weekday time.Weekday) time.Time {
+	start := time.Date(date.Year(), date.Month(), 1, 0, 0, 0, 0, date.Location())
+	offset := (int(weekday) - int(start.Weekday()) + 7) % 7
+	return start.AddDate(0, 0, offset)
+}
+
+func startOfWeek(date time.Time, weekStart time.Weekday) time.Time {
+	date = normalizeDate(date)
+	offset := (int(date.Weekday()) - int(weekStart) + 7) % 7
+	return date.AddDate(0, 0, -offset)
+}
+
+func weekdayOffset(weekStart, target time.Weekday) int {
+	return (int(target) - int(weekStart) + 7) % 7
 }
 
 func isOverdue(t storage.Task) bool {
@@ -2634,7 +3025,7 @@ func filterYN(v string) string {
 func filterRule(v string) string {
 	var b strings.Builder
 	for _, r := range v {
-		if r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+		if r == '-' || r == '_' || r == '/' || r == ',' || r == ' ' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
 			b.WriteRune(r)
 		}
 	}
