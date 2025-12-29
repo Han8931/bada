@@ -20,6 +20,7 @@ type Task struct {
 	Title              string
 	Done               bool
 	Topics             []string
+	Timezone           string
 	Tags               string
 	Due                sql.NullTime
 	Start              sql.NullTime
@@ -95,6 +96,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	tags TEXT DEFAULT '',
 	due TEXT DEFAULT NULL,
 	start_at TEXT DEFAULT NULL,
+	timezone TEXT DEFAULT '',
 	priority INTEGER NOT NULL DEFAULT 0,
 	recurring INTEGER NOT NULL DEFAULT 0,
 	recurrence_rule TEXT DEFAULT '',
@@ -125,6 +127,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 func (s *Store) ensureTaskColumns() error {
 	required := map[string]string{
+		"timezone":            "ALTER TABLE tasks ADD COLUMN timezone TEXT DEFAULT '';",
 		"start_at":            "ALTER TABLE tasks ADD COLUMN start_at TEXT DEFAULT NULL;",
 		"priority":            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
 		"recurring":           "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
@@ -239,7 +242,7 @@ func (s *Store) ensureTopicNoteColumns() error {
 }
 
 func (s *Store) FetchTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -264,10 +267,17 @@ func (s *Store) FetchTasks() ([]Task, error) {
 	return tasks, nil
 }
 
-func (s *Store) AddTask(title string) error {
+func (s *Store) AddTask(title string) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`INSERT INTO tasks (title, done, created_at) VALUES (?, 0, ?);`, title, now)
-	return err
+	res, err := s.db.Exec(`INSERT INTO tasks (title, done, created_at) VALUES (?, 0, ?);`, title, now)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return int(id), nil
 }
 
 func (s *Store) SetDone(id int, done bool) error {
@@ -390,7 +400,7 @@ func (s *Store) ShiftDue(id int, days int) error {
 	return err
 }
 
-func (s *Store) UpdateTaskMetadata(id int, topic, tags string, priority int, due, start sql.NullTime, recurring bool) error {
+func (s *Store) UpdateTaskMetadata(id int, topic, tags, timezone string, priority int, due, start sql.NullTime, recurring bool) error {
 	dueStr := sql.NullString{}
 	if due.Valid {
 		dueStr = sql.NullString{String: due.Time.UTC().Format(time.RFC3339), Valid: true}
@@ -408,8 +418,8 @@ func (s *Store) UpdateTaskMetadata(id int, topic, tags string, priority int, due
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`UPDATE tasks SET tags = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
-		tags, priority, dueStr, startStr, rec, id)
+	_, err = tx.Exec(`UPDATE tasks SET tags = ?, timezone = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
+		tags, timezone, priority, dueStr, startStr, rec, id)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -515,8 +525,8 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 	}
 	for _, e := range entries {
 		task := e.Task
-		res, err := tx.Exec(`INSERT INTO tasks (title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			task.Title, boolToInt(task.Done), task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
+		res, err := tx.Exec(`INSERT INTO tasks (title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			task.Title, boolToInt(task.Done), task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Timezone, task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -554,7 +564,7 @@ func (s *Store) PurgeTrash(entries []TrashEntry) error {
 }
 
 func (s *Store) fetchTaskByID(id int) (Task, error) {
-	row := s.db.QueryRow(`SELECT id, title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
+	row := s.db.QueryRow(`SELECT id, title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
 	task, err := scanTask(row)
 	if err != nil {
 		return Task{}, err
@@ -568,7 +578,7 @@ func (s *Store) fetchTaskByID(id int) (Task, error) {
 }
 
 func (s *Store) fetchDoneTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
@@ -594,7 +604,7 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 }
 
 func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.tags, tasks.due, tasks.start_at, tasks.priority,
+	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.tags, tasks.due, tasks.start_at, tasks.timezone, tasks.priority,
 tasks.recurring, tasks.recurrence_rule, tasks.recurrence_interval, tasks.notes, tasks.created_at, tasks.completed_at
 FROM tasks
 INNER JOIN task_topics ON tasks.id = task_topics.task_id
@@ -774,7 +784,7 @@ func scanTask(scanner rowScanner) (Task, error) {
 	var dueStr, startStr, completedStr sql.NullString
 	var createdStr string
 
-	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Tags, &dueStr, &startStr, &t.Timezone, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
 		return Task{}, err
 	}
 	t.Done = doneInt == 1

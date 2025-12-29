@@ -82,6 +82,7 @@ type metaState struct {
 	priority string
 	due      string
 	start    string
+	timezone string
 	rule     string
 	interval string
 	index    int
@@ -243,22 +244,24 @@ func (m Model) updateAddMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Title cannot be empty"
 			return m, nil
 		}
-		if err := m.store.AddTask(title); err != nil {
+		taskID, err := m.store.AddTask(title)
+		if err != nil {
 			m.status = fmt.Sprintf("save failed: %v", err)
 			return m, nil
 		}
-		var err error
 		m.tasks, err = m.store.FetchTasks()
 		if err != nil {
 			m.status = fmt.Sprintf("reload failed: %v", err)
-		} else {
-			m.status = "Added task"
-			m.sortTasks()
-			m.cursor = clampCursor(m.findVisibleTaskIndex(m.lastTaskID()), len(m.visibleItems()))
+			return m, nil
 		}
+		m.sortTasks()
 		m.input.SetValue("")
 		m.input.Blur()
 		m.mode = modeList
+		if idx := m.findTaskIndex(taskID); idx >= 0 {
+			return m.startMetadataEdit(m.tasks[idx])
+		}
+		m.status = "Added task"
 		return m, nil
 	default:
 		var cmd tea.Cmd
@@ -301,9 +304,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			m.cursor = clampCursor(m.cursor-1, len(vis))
 		}
 	case m.cfg.Keys.Add:
-		m.mode = modeAdd
-		m.input.Focus()
-		m.status = "Add mode: type a title and press Enter"
+		return m.startMetadataAdd()
 	case m.cfg.Keys.Toggle:
 		task, ok := m.currentTask()
 		if !ok {
@@ -1451,6 +1452,7 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 		priority: fmt.Sprintf("%d", t.Priority),
 		due:      formatDate(t.Due),
 		start:    defaultStart(t),
+		timezone: defaultTimezone(t.Timezone),
 		rule:     t.RecurrenceRule,
 		interval: intervalString(t.RecurrenceInterval),
 		index:    0,
@@ -1461,6 +1463,29 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.input.Focus()
 	m.mode = modeMetadata
 	m.status = "Edit metadata: up/down or tab/shift+tab to move, enter to save/next, esc to cancel"
+	return m, nil
+}
+
+func (m Model) startMetadataAdd() (tea.Model, tea.Cmd) {
+	m.meta = &metaState{
+		taskID:   0,
+		title:    "",
+		topic:    "",
+		tags:     "",
+		priority: "",
+		due:      "",
+		start:    "",
+		timezone: defaultTimezone(""),
+		rule:     "",
+		interval: "",
+		index:    0,
+	}
+	m.input.SetValue(m.meta.currentValue())
+	m.input.CursorEnd()
+	m.input.Placeholder = m.meta.currentLabel()
+	m.input.Focus()
+	m.mode = modeMetadata
+	m.status = "Add task: fill fields and press Enter to save"
 	return m, nil
 }
 
@@ -1509,6 +1534,14 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 		m.meta.setCurrentValue(m.input.Value())
+		if m.meta.taskID == 0 && m.meta.index < len(metaFields())-1 {
+			m.meta.index++
+			m.input.SetValue(m.meta.currentValue())
+			m.input.CursorEnd()
+			m.input.Placeholder = m.meta.currentLabel()
+			m.status = m.metaPrompt()
+			return m, nil
+		}
 		var err error
 		m, err = m.applyMetadataAndReload()
 		if err != nil {
@@ -1579,10 +1612,11 @@ func (m *Model) applyMetaInputSanitizer() {
 		m.input.SetValue(filterDigits(m.input.Value()))
 	case 4, 5: // dates
 		m.input.SetValue(filterDate(m.input.Value()))
-	case 6: // recurrence rule
-		// allow only letters/dots
+	case 6: // timezone
+		m.input.SetValue(filterTimezone(m.input.Value()))
+	case 7: // recurrence rule
 		m.input.SetValue(filterRule(m.input.Value()))
-	case 7: // interval
+	case 8: // interval
 		m.input.SetValue(filterDigits(m.input.Value()))
 	}
 	m.meta.setCurrentValue(m.input.Value())
@@ -1596,6 +1630,7 @@ func metaFields() []string {
 		"Priority",
 		"Due Date (YYYY-MM-DD)",
 		"Start Date (YYYY-MM-DD)",
+		"Timezone (UTC±HH:MM)",
 		"Recurrence",
 		"Interval",
 	}
@@ -1620,8 +1655,10 @@ func (ms metaState) currentValue() string {
 	case 5:
 		return ms.start
 	case 6:
-		return ms.rule
+		return ms.timezone
 	case 7:
+		return ms.rule
+	case 8:
 		return ms.interval
 	default:
 		return ""
@@ -1643,8 +1680,10 @@ func (ms *metaState) setCurrentValue(v string) {
 	case 5:
 		ms.start = v
 	case 6:
-		ms.rule = v
+		ms.timezone = v
 	case 7:
+		ms.rule = v
+	case 8:
 		ms.interval = v
 	}
 }
@@ -1697,6 +1736,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		m.status = fmt.Sprintf("start date invalid: %v", err)
 		return m, nil
 	}
+	timezone := normalizeTimezone(m.meta.timezone)
 	ruleInput := strings.TrimSpace(m.meta.rule)
 	rule := strings.TrimSpace(ruleInput)
 	interval := parseInterval(m.meta.interval)
@@ -1715,7 +1755,14 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		}
 	}
 
-	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, priority, due, start, recurring); err != nil {
+	if taskID == 0 {
+		newID, err := m.store.AddTask(title)
+		if err != nil {
+			return m, err
+		}
+		taskID = newID
+	}
+	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, timezone, priority, due, start, recurring); err != nil {
 		return m, err
 	}
 	if err := m.store.UpdateRecurrence(taskID, rule, interval); err != nil {
@@ -1811,6 +1858,7 @@ func (m Model) renderMetaBox() string {
 		m.meta.priority,
 		m.meta.due,
 		m.meta.start,
+		m.meta.timezone,
 		m.meta.rule,
 		m.meta.interval,
 	}
@@ -1989,6 +2037,7 @@ func (m Model) renderMetadataPanel() string {
 		{label: "Tags", value: ""},
 		{label: "Priority", value: ""},
 		{label: "Start", value: ""},
+		{label: "Timezone", value: ""},
 		{label: "Recurrence", value: ""},
 	}
 	if ok {
@@ -1997,14 +2046,15 @@ func (m Model) renderMetadataPanel() string {
 		rows[2].value = emptyPlaceholder(task.Tags)
 		rows[3].value = fmt.Sprintf("%d", task.Priority)
 		rows[4].value = defaultStart(task)
+		rows[5].value = defaultTimezone(task.Timezone)
 		if recSummary := recurrenceSummary(task); recSummary != "" {
 			if next, ok := nextRecurrenceDate(task); ok {
-				rows[5].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
+				rows[6].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
 			} else {
-				rows[5].value = recSummary
+				rows[6].value = recSummary
 			}
 		} else {
-			rows[5].value = "off"
+			rows[6].value = "off"
 		}
 	} else {
 		for i := range rows {
@@ -2625,13 +2675,6 @@ func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) lastTaskID() int {
-	if len(m.tasks) == 0 {
-		return 0
-	}
-	return m.tasks[len(m.tasks)-1].ID
-}
-
 func (m *Model) sortTasks() {
 	switch m.sortMode {
 	case "auto":
@@ -3188,6 +3231,62 @@ func filterRule(v string) string {
 		}
 	}
 	return b.String()
+}
+
+func filterTimezone(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if r == '+' || r == '-' || r == ':' || r == ' ' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func defaultTimezone(v string) string {
+	v = strings.TrimSpace(v)
+	if v != "" {
+		return v
+	}
+	return localTimezoneOffset()
+}
+
+func normalizeTimezone(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return localTimezoneOffset()
+	}
+	re := regexp.MustCompile(`(?i)^(utc)?\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$`)
+	m := re.FindStringSubmatch(v)
+	if m == nil {
+		return v
+	}
+	hours, err := strconv.Atoi(m[3])
+	if err != nil {
+		return v
+	}
+	mins := 0
+	if strings.TrimSpace(m[4]) != "" {
+		if val, err := strconv.Atoi(m[4]); err == nil {
+			mins = val
+		}
+	}
+	if hours < 0 || hours > 23 || mins < 0 || mins > 59 {
+		return v
+	}
+	return fmt.Sprintf("UTC%s%02d:%02d", m[2], hours, mins)
+}
+
+func localTimezoneOffset() string {
+	_, offset := time.Now().In(time.Local).Zone()
+	sign := "+"
+	if offset < 0 {
+		sign = "-"
+		offset = -offset
+	}
+	hours := offset / 3600
+	mins := (offset % 3600) / 60
+	return fmt.Sprintf("UTC%s%02d:%02d", sign, hours, mins)
 }
 
 type itemKind int
