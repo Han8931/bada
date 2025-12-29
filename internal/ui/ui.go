@@ -115,6 +115,7 @@ type Model struct {
 	confirmDel    bool
 	pendingDel    *storage.Task
 	pendingBatch  []storage.Task
+	reportScroll  int
 	confirmTopic  bool
 	pendingTopic  string
 	trashSelected map[int]bool
@@ -468,12 +469,27 @@ func (m Model) View() string {
 	}
 
 	if m.mode == modeReport {
-		b.WriteString(m.renderListBanner())
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render("Reminder Report"))
-		b.WriteString("\n\n")
-		b.WriteString(m.report)
-		b.WriteString("\n\n")
+		header := m.renderReportHeader()
+		footer := m.renderReportFooter()
+		gap := "\n"
+		tail := ""
+		bodyMax := 0
+		if m.height > 0 {
+			available := m.height - 1
+			bodyMax = available - countLines(header) - countLines(footer) - countLines(gap) - countLines(tail)
+			if bodyMax < 0 {
+				bodyMax = 0
+			}
+		}
+		b.WriteString(header)
+		if m.height > 0 {
+			b.WriteString(m.renderReportWithHeight(bodyMax))
+		} else {
+			b.WriteString(m.report)
+		}
+		b.WriteString(gap)
+		b.WriteString(footer)
+		b.WriteString(tail)
 		return m.fillView(b.String())
 	}
 
@@ -680,6 +696,7 @@ func (m Model) enterTrashView() (tea.Model, tea.Cmd) {
 func (m Model) enterReportView() (tea.Model, tea.Cmd) {
 	m.refreshReport()
 	m.mode = modeReport
+	m.reportScroll = 0
 	m.status = "Reminder report"
 	return m, nil
 }
@@ -753,9 +770,16 @@ func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		return m, nil
 	case ":":
 		return m.startCommand()
+	case m.cfg.Keys.Up, "up":
+		if m.reportScroll > 0 {
+			m.reportScroll--
+		}
+	case m.cfg.Keys.Down, "down":
+		m.reportScroll = clampInt(m.reportScroll+1, 0, m.reportMaxScroll())
 	default:
 		return m, nil
 	}
+	return m, nil
 }
 
 func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
@@ -936,6 +960,61 @@ func (m Model) selectedTaskList() []storage.Task {
 		}
 	}
 	return selected
+}
+
+func (m Model) renderReportHeader() string {
+	var b strings.Builder
+	b.WriteString(m.renderListBanner())
+	b.WriteString("\n\n")
+	b.WriteString(m.styles.Accent.Render("#### Reminder Report ####"))
+	b.WriteString("\n\n")
+	return b.String()
+}
+
+func (m Model) renderReportFooter() string {
+	return m.styles.Muted.Render("Press enter/esc/q to close, : for commands")
+}
+
+func (m Model) reportLines() []string {
+	return strings.Split(strings.TrimRight(m.report, "\n"), "\n")
+}
+
+func (m Model) reportMaxScroll() int {
+	if m.height <= 0 {
+		return 0
+	}
+	header := m.renderReportHeader()
+	footer := m.renderReportFooter()
+	gap := "\n"
+	bodyMax := m.height - 1 - countLines(header) - countLines(footer) - countLines(gap)
+	if bodyMax <= 0 {
+		return 0
+	}
+	lines := m.reportLines()
+	if len(lines) <= bodyMax {
+		return 0
+	}
+	return len(lines) - bodyMax
+}
+
+func (m Model) renderReportWithHeight(maxLines int) string {
+	lines := m.reportLines()
+	if maxLines <= 0 {
+		return ""
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	maxScroll := len(lines) - maxLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := clampInt(m.reportScroll, 0, maxScroll)
+	end := scroll + maxLines
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return strings.Join(lines[scroll:end], "\n")
 }
 
 func renderHelp(k config.Keymap) string {
@@ -1880,6 +1959,7 @@ func (m *Model) refreshReport() {
 	b.WriteString("\n")
 	m.report = b.String()
 	m.status = "Reminder report"
+	m.reportScroll = 0
 }
 
 func wrapIndex(idx, n int) int {

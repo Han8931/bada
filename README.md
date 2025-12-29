@@ -66,6 +66,9 @@ Options:
 
 # Todo
 
+## UI
+* The cursor and text color issue
+
 ## Basic Features
 
 * Timezone setting
@@ -86,6 +89,10 @@ Options:
 - End conditions: Support “until date” or “after N occurrences.”
 - Exception dates: Let users add one‑off skip dates (holidays, vacations).
 - Human‑readable labels: Store a normalized rule and a display label (e.g., weekly:mon,wed → “Weekly on Mon/Wed”).
+
+## DB and Task Sharing
+
+* Supabase and create API
 
 ## AI Features
 
