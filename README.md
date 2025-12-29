@@ -75,12 +75,6 @@ Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to custo
 - Exception dates: Let users add one‑off skip dates (holidays, vacations).
 - Human‑readable labels: Store a normalized rule and a display label (e.g., weekly:mon,wed → “Weekly on Mon/Wed”).
 
-
-
-## UI
-* Markdown view
-* 
-
 ## AI Features
 
 * **Natural Language Intake:** Convert "Buy milk tomorrow at 5pm" into a structured task with a due date and tags.

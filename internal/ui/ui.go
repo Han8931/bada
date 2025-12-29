@@ -147,7 +147,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 		status:        "",
 		input:         ti,
 		mode:          modeReport,
-		recentLimit:   10,
+		recentLimit:   5,
 		filterDone:    strings.ToLower(cfg.DefaultFilter),
 		sortMode:      "auto",
 		currentTopic:  "",
