@@ -869,8 +869,8 @@ func (m Model) renderTaskList() string {
 			if isSpecialTopic(it.topic) {
 				line = fmt.Sprintf("   %-2s %s", "📁", it.topic)
 			} else {
-				count := m.topicCounts()[it.topic]
-				line = fmt.Sprintf("   %-2s %s (%d)", "📁", it.topic, count)
+				stat := m.topicStats()[it.topic]
+				line = fmt.Sprintf("   %-2s %s (%d/%d)", "📁", it.topic, stat.overdue, stat.total)
 			}
 			if m.cursor == i && m.mode == modeList {
 				line = m.styles.Selection.Render(line)
@@ -2654,6 +2654,11 @@ type listItem struct {
 	task  storage.Task
 }
 
+type topicStat struct {
+	overdue int
+	total   int
+}
+
 func (m Model) recentlyAdded(limit int) []storage.Task {
 	cp := append([]storage.Task{}, m.tasks...)
 	sort.SliceStable(cp, func(i, j int) bool {
@@ -2848,24 +2853,23 @@ func uniqueTopics(topics []string) []string {
 	return out
 }
 
-func (m Model) topicCounts() map[string]int {
-	counts := make(map[string]int)
-	now := time.Now()
+func (m Model) topicStats() map[string]topicStat {
+	stats := make(map[string]topicStat)
 	for _, t := range m.tasks {
-		if t.Done || !t.Due.Valid || !now.After(t.Due.Time) {
-			continue
-		}
 		if len(t.Topics) == 0 {
 			continue
 		}
+		overdue := isOverdue(t)
 		for _, topic := range uniqueTopics(t.Topics) {
-			counts[topic]++
+			stat := stats[topic]
+			stat.total++
+			if overdue {
+				stat.overdue++
+			}
+			stats[topic] = stat
 		}
 	}
-	// virtual topics (overdue only)
-	counts["RecentlyAdded"] = m.countOverdue(m.recentlyAdded(m.recentLimit))
-	counts["RecentlyDone"] = m.countOverdue(m.recentlyDone(m.recentLimit))
-	return counts
+	return stats
 }
 
 func (m Model) sortedTopics() []string {

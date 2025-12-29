@@ -20,8 +20,6 @@ type Task struct {
 	Title              string
 	Done               bool
 	Topics             []string
-	LegacyProject      string `json:"Project,omitempty"`
-	LegacyTopic        string `json:"Topic,omitempty"`
 	Tags               string
 	Due                sql.NullTime
 	Start              sql.NullTime
@@ -94,7 +92,6 @@ CREATE TABLE IF NOT EXISTS tasks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	title TEXT NOT NULL,
 	done INTEGER NOT NULL DEFAULT 0,
-	topic TEXT DEFAULT '',
 	tags TEXT DEFAULT '',
 	due TEXT DEFAULT NULL,
 	start_at TEXT DEFAULT NULL,
@@ -120,12 +117,14 @@ CREATE TABLE IF NOT EXISTS tasks (
 	if err := s.ensureTaskTopics(); err != nil {
 		return err
 	}
+	if err := s.dropLegacyTopicColumn(); err != nil {
+		return err
+	}
 	return s.ensureTopicNoteColumns()
 }
 
 func (s *Store) ensureTaskColumns() error {
 	required := map[string]string{
-		"topic":               "ALTER TABLE tasks ADD COLUMN topic TEXT DEFAULT '';",
 		"start_at":            "ALTER TABLE tasks ADD COLUMN start_at TEXT DEFAULT NULL;",
 		"priority":            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
 		"recurring":           "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
@@ -149,15 +148,6 @@ func (s *Store) ensureTaskColumns() error {
 			return err
 		}
 		existing[name] = struct{}{}
-	}
-	if _, ok := existing["project"]; ok {
-		if _, hasTopic := existing["topic"]; !hasTopic {
-			if _, err := s.db.Exec(`ALTER TABLE tasks RENAME COLUMN project TO topic;`); err != nil {
-				return err
-			}
-			delete(existing, "project")
-			existing["topic"] = struct{}{}
-		}
 	}
 	for col, alter := range required {
 		if _, ok := existing[col]; ok {
@@ -184,47 +174,37 @@ func (s *Store) ensureTaskTopics() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_topics_task_id ON task_topics(task_id);`); err != nil {
 		return err
 	}
-	return s.migrateLegacyTopics()
+	return nil
 }
 
-func (s *Store) migrateLegacyTopics() error {
-	existing := map[int]struct{}{}
-	existingRows, err := s.db.Query(`SELECT DISTINCT task_id FROM task_topics;`)
-	if err == nil {
-		for existingRows.Next() {
-			var id int
-			if err := existingRows.Scan(&id); err != nil {
-				existingRows.Close()
-				return err
-			}
-			existing[id] = struct{}{}
-		}
-		if err := existingRows.Err(); err != nil {
-			existingRows.Close()
-			return err
-		}
-		existingRows.Close()
-	}
-	rows, err := s.db.Query(`SELECT id, topic FROM tasks WHERE topic IS NOT NULL AND topic != '';`)
+func (s *Store) dropLegacyTopicColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(tasks);`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	hasTopic := false
 	for rows.Next() {
-		var id int
-		var raw string
-		if err := rows.Scan(&id, &raw); err != nil {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			return err
 		}
-		if _, ok := existing[id]; ok {
-			continue
-		}
-		topics := splitTopics(raw)
-		if err := s.setTaskTopics(id, topics); err != nil {
-			return err
+		if name == "topic" {
+			hasTopic = true
+			break
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasTopic {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE tasks DROP COLUMN topic;`)
+	return err
 }
 
 func (s *Store) ensureTopicNoteColumns() error {
@@ -535,14 +515,6 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 	}
 	for _, e := range entries {
 		task := e.Task
-		topics := task.Topics
-		if len(topics) == 0 {
-			raw := task.LegacyTopic
-			if strings.TrimSpace(raw) == "" {
-				raw = task.LegacyProject
-			}
-			topics = splitTopics(raw)
-		}
 		res, err := tx.Exec(`INSERT INTO tasks (title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 			task.Title, boolToInt(task.Done), task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
 		if err != nil {
@@ -554,7 +526,7 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 			tx.Rollback()
 			return err
 		}
-		if err := s.setTaskTopicsTx(tx, int(id), topics); err != nil {
+		if err := s.setTaskTopicsTx(tx, int(id), task.Topics); err != nil {
 			tx.Rollback()
 			return err
 		}
