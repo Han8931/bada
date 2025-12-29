@@ -867,10 +867,10 @@ func (m Model) renderTaskList() string {
 		case itemTopic:
 			line := ""
 			if isSpecialTopic(it.topic) {
-				line = fmt.Sprintf("   %-2s %-40s", "📁", it.topic)
+				line = fmt.Sprintf("   %-2s %s", "📁", it.topic)
 			} else {
 				count := m.topicCounts()[it.topic]
-				line = fmt.Sprintf("   %-2s %-40s (%d)", "📁", it.topic, count)
+				line = fmt.Sprintf("   %-2s %s (%d)", "📁", it.topic, count)
 			}
 			if m.cursor == i && m.mode == modeList {
 				line = m.styles.Selection.Render(line)
@@ -1649,7 +1649,8 @@ func (m *Model) refreshReport() {
 	writeDivider()
 
 	if len(overdue) == 0 && len(todayList) == 0 && len(upcoming) == 0 {
-		b.WriteString(m.styles.Success.Render("All clear. No due tasks.\n"))
+		b.WriteString(m.styles.Success.Render("  All clear. No due tasks."))
+		b.WriteString("\n\n")
 	} else {
 		writeSection := func(title string, tasks []storage.Task, style lipgloss.Style) {
 			writeSectionHeader(title, len(tasks))
@@ -1881,7 +1882,7 @@ func (m Model) renderListBanner() string {
 	lines := []string{
 		" ____    _    ____    _    ",
 		"| __ )  / \\  |  _ \\  / \\   ",
-		"|  _ \\ / _ \\ | | | / _ \\  ",
+		"|  _ \\ / _ \\ | | | \\/ _ \\  ",
 		"| |_) / ___ \\| |_| / ___ \\ ",
 		"|____/_/   \\_\\____/_/   \\_\\",
 	}
