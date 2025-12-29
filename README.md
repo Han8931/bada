@@ -66,15 +66,10 @@ Options:
 
 # Todo
 
-## UI
-* The cursor and text color issue
-
 ## Basic Features
 
-* Timezone setting
 * Agenda reporting config (+7 or +3)
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
-* **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * Integrate with Gorae / Bori
 
