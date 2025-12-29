@@ -19,7 +19,9 @@ type Task struct {
 	ID                 int
 	Title              string
 	Done               bool
-	Topic              string
+	Topics             []string
+	LegacyProject      string `json:"Project,omitempty"`
+	LegacyTopic        string `json:"Topic,omitempty"`
 	Tags               string
 	Due                sql.NullTime
 	Start              sql.NullTime
@@ -115,6 +117,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 	if err := s.ensureTaskColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureTaskTopics(); err != nil {
+		return err
+	}
 	return s.ensureTopicNoteColumns()
 }
 
@@ -165,6 +170,63 @@ func (s *Store) ensureTaskColumns() error {
 	return rows.Err()
 }
 
+func (s *Store) ensureTaskTopics() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS task_topics (
+	task_id INTEGER NOT NULL,
+	topic TEXT NOT NULL,
+	PRIMARY KEY (task_id, topic)
+);`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_topics_topic ON task_topics(topic);`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_topics_task_id ON task_topics(task_id);`); err != nil {
+		return err
+	}
+	return s.migrateLegacyTopics()
+}
+
+func (s *Store) migrateLegacyTopics() error {
+	existing := map[int]struct{}{}
+	existingRows, err := s.db.Query(`SELECT DISTINCT task_id FROM task_topics;`)
+	if err == nil {
+		for existingRows.Next() {
+			var id int
+			if err := existingRows.Scan(&id); err != nil {
+				existingRows.Close()
+				return err
+			}
+			existing[id] = struct{}{}
+		}
+		if err := existingRows.Err(); err != nil {
+			existingRows.Close()
+			return err
+		}
+		existingRows.Close()
+	}
+	rows, err := s.db.Query(`SELECT id, topic FROM tasks WHERE topic IS NOT NULL AND topic != '';`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		if _, ok := existing[id]; ok {
+			continue
+		}
+		topics := splitTopics(raw)
+		if err := s.setTaskTopics(id, topics); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func (s *Store) ensureTopicNoteColumns() error {
 	required := map[string]string{
 		"notes": "ALTER TABLE topic_notes ADD COLUMN notes TEXT NOT NULL DEFAULT '';",
@@ -197,21 +259,26 @@ func (s *Store) ensureTopicNoteColumns() error {
 }
 
 func (s *Store) FetchTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var tasks []Task
+	var ids []int
 	for rows.Next() {
 		t, err := scanTask(rows)
 		if err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, t)
+		ids = append(ids, t.ID)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.attachTopics(tasks, ids); err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -242,6 +309,9 @@ func (s *Store) DeleteTask(id int) error {
 	if err := s.moveToTrash([]Task{task}); err != nil {
 		return err
 	}
+	if _, err := s.db.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, id); err != nil {
+		return err
+	}
 	_, err = s.db.Exec(`DELETE FROM tasks WHERE id = ?;`, id)
 	return err
 }
@@ -255,6 +325,11 @@ func (s *Store) DeleteDoneTasks() (int64, error) {
 		if err := s.moveToTrash(doneTasks); err != nil {
 			return 0, err
 		}
+		for _, task := range doneTasks {
+			if _, err := s.db.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, task.ID); err != nil {
+				return 0, err
+			}
+		}
 	}
 	res, err := s.db.Exec(`DELETE FROM tasks WHERE done = 1;`)
 	if err != nil {
@@ -264,8 +339,22 @@ func (s *Store) DeleteDoneTasks() (int64, error) {
 }
 
 func (s *Store) RenameTopic(oldName, newName string) (int64, error) {
-	res, err := s.db.Exec(`UPDATE tasks SET topic = ? WHERE topic = ?;`, newName, oldName)
+	tx, err := s.db.Begin()
 	if err != nil {
+		return 0, err
+	}
+	_, err = tx.Exec(`INSERT OR IGNORE INTO task_topics (task_id, topic)
+SELECT task_id, ? FROM task_topics WHERE topic = ?;`, newName, oldName)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM task_topics WHERE topic = ?;`, oldName)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	if err := s.renameTopicNote(oldName, newName); err != nil {
@@ -276,16 +365,7 @@ func (s *Store) RenameTopic(oldName, newName string) (int64, error) {
 }
 
 func (s *Store) DeleteTopic(topic string) (int64, error) {
-	tasks, err := s.fetchTasksByTopic(topic)
-	if err != nil {
-		return 0, err
-	}
-	if len(tasks) > 0 {
-		if err := s.moveToTrash(tasks); err != nil {
-			return 0, err
-		}
-	}
-	res, err := s.db.Exec(`DELETE FROM tasks WHERE topic = ?;`, topic)
+	res, err := s.db.Exec(`DELETE FROM task_topics WHERE topic = ?;`, topic)
 	if err != nil {
 		return 0, err
 	}
@@ -343,9 +423,22 @@ func (s *Store) UpdateTaskMetadata(id int, topic, tags string, priority int, due
 	if recurring {
 		rec = 1
 	}
-	_, err := s.db.Exec(`UPDATE tasks SET topic = ?, tags = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
-		topic, tags, priority, dueStr, startStr, rec, id)
-	return err
+	topics := splitTopics(topic)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE tasks SET tags = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
+		tags, priority, dueStr, startStr, rec, id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.setTaskTopicsTx(tx, id, topics); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateRecurrence(id int, rule string, interval int) error {
@@ -442,9 +535,26 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 	}
 	for _, e := range entries {
 		task := e.Task
-		_, err := tx.Exec(`INSERT INTO tasks (title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			task.Title, boolToInt(task.Done), task.Topic, task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
+		topics := task.Topics
+		if len(topics) == 0 {
+			raw := task.LegacyTopic
+			if strings.TrimSpace(raw) == "" {
+				raw = task.LegacyProject
+			}
+			topics = splitTopics(raw)
+		}
+		res, err := tx.Exec(`INSERT INTO tasks (title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			task.Title, boolToInt(task.Done), task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
 		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := s.setTaskTopicsTx(tx, int(id), topics); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -472,50 +582,186 @@ func (s *Store) PurgeTrash(entries []TrashEntry) error {
 }
 
 func (s *Store) fetchTaskByID(id int) (Task, error) {
-	row := s.db.QueryRow(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
-	return scanTask(row)
+	row := s.db.QueryRow(`SELECT id, title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
+	task, err := scanTask(row)
+	if err != nil {
+		return Task{}, err
+	}
+	topics, err := s.fetchTopicsForTask(id)
+	if err != nil {
+		return Task{}, err
+	}
+	task.Topics = topics
+	return task, nil
 }
 
 func (s *Store) fetchDoneTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
+	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var tasks []Task
+	var ids []int
 	for rows.Next() {
 		t, err := scanTask(rows)
 		if err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, t)
+		ids = append(ids, t.ID)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.attachTopics(tasks, ids); err != nil {
 		return nil, err
 	}
 	return tasks, nil
 }
 
 func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, topic, tags, due, start_at, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE topic = ? ORDER BY id;`, topic)
+	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.tags, tasks.due, tasks.start_at, tasks.priority,
+tasks.recurring, tasks.recurrence_rule, tasks.recurrence_interval, tasks.notes, tasks.created_at, tasks.completed_at
+FROM tasks
+INNER JOIN task_topics ON tasks.id = task_topics.task_id
+WHERE task_topics.topic = ?
+ORDER BY tasks.id;`, topic)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var tasks []Task
+	var ids []int
 	for rows.Next() {
 		t, err := scanTask(rows)
 		if err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, t)
+		ids = append(ids, t.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := s.attachTopics(tasks, ids); err != nil {
+		return nil, err
+	}
 	return tasks, nil
+}
+
+func (s *Store) attachTopics(tasks []Task, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	topicMap, err := s.fetchTopicsForTasks(ids)
+	if err != nil {
+		return err
+	}
+	for i := range tasks {
+		tasks[i].Topics = topicMap[tasks[i].ID]
+	}
+	return nil
+}
+
+func (s *Store) fetchTopicsForTask(id int) ([]string, error) {
+	rows, err := s.db.Query(`SELECT topic FROM task_topics WHERE task_id = ? ORDER BY topic;`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var topics []string
+	for rows.Next() {
+		var topic string
+		if err := rows.Scan(&topic); err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return topics, nil
+}
+
+func (s *Store) fetchTopicsForTasks(ids []int) (map[int][]string, error) {
+	if len(ids) == 0 {
+		return map[int][]string{}, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(`SELECT task_id, topic FROM task_topics WHERE task_id IN (%s) ORDER BY topic;`, strings.Join(placeholders, ","))
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[int][]string{}
+	for rows.Next() {
+		var taskID int
+		var topic string
+		if err := rows.Scan(&taskID, &topic); err != nil {
+			return nil, err
+		}
+		m[taskID] = append(m[taskID], topic)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func splitTopics(raw string) []string {
+	parts := strings.Split(raw, ",")
+	return normalizeTopics(parts)
+}
+
+func normalizeTopics(topics []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		topic = strings.TrimSpace(topic)
+		if topic == "" {
+			continue
+		}
+		if _, ok := seen[topic]; ok {
+			continue
+		}
+		seen[topic] = struct{}{}
+		out = append(out, topic)
+	}
+	return out
+}
+
+func (s *Store) setTaskTopics(id int, topics []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := s.setTaskTopicsTx(tx, id, topics); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) setTaskTopicsTx(tx *sql.Tx, id int, topics []string) error {
+	topics = normalizeTopics(topics)
+	if _, err := tx.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, id); err != nil {
+		return err
+	}
+	for _, topic := range topics {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO task_topics (task_id, topic) VALUES (?, ?);`, id, topic); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) moveToTrash(tasks []Task) error {
@@ -556,7 +802,7 @@ func scanTask(scanner rowScanner) (Task, error) {
 	var dueStr, startStr, completedStr sql.NullString
 	var createdStr string
 
-	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Topic, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Tags, &dueStr, &startStr, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
 		return Task{}, err
 	}
 	t.Done = doneInt == 1

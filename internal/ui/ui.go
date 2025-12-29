@@ -327,7 +327,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 				if it.kind == itemTopic && m.currentTopic == "" && !isSpecialTopic(it.topic) {
 					m.confirmTopic = true
 					m.pendingTopic = it.topic
-					m.status = fmt.Sprintf("Delete topic \"%s\" and its tasks? y/n", it.topic)
+					m.status = fmt.Sprintf("Delete topic \"%s\" and remove it from tasks? y/n", it.topic)
 				}
 			}
 			return m, nil
@@ -387,8 +387,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, humanDone(task.Done))
-		if task.Topic != "" {
-			info += " • topic:" + task.Topic
+		if len(task.Topics) > 0 {
+			info += " • topics:" + strings.Join(task.Topics, ",")
 		}
 		if strings.TrimSpace(task.Tags) != "" {
 			info += " • tags:" + task.Tags
@@ -583,7 +583,7 @@ func (m Model) updateDeleteTopicConfirm(key string) (tea.Model, tea.Cmd) {
 		if errReload == nil {
 			m.sortTasks()
 			m.cursor = clampCursor(0, len(m.visibleItems()))
-			m.status = fmt.Sprintf("Deleted topic \"%s\" (%d tasks)", m.pendingTopic, n)
+			m.status = fmt.Sprintf("Removed topic \"%s\" from %d task(s)", m.pendingTopic, n)
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", errReload)
 		}
@@ -908,8 +908,8 @@ func (m Model) renderTaskList() string {
 					body += " " + m.styles.Warning.Render(recBadge)
 				}
 			}
-			if m.searchActive() && strings.TrimSpace(it.task.Topic) != "" {
-				body += " [" + it.task.Topic + "]"
+			if m.searchActive() && len(it.task.Topics) > 0 {
+				body += " [" + strings.Join(it.task.Topics, ",") + "]"
 			}
 			if m.cursor == i && m.mode == modeList {
 				body = m.styles.Selection.Render(body)
@@ -929,7 +929,7 @@ func (m Model) renderTaskList() string {
 
 func (m Model) renderTrashList() string {
 	var b strings.Builder
-	header := "   Sel Deleted            Title                          Topic"
+	header := "   Sel Deleted            Title                          Topics"
 	lineWidth := len(header)
 	if m.width > lineWidth {
 		lineWidth = m.width
@@ -949,7 +949,7 @@ func (m Model) renderTrashList() string {
 			title = title[:30]
 		}
 		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
-		line := fmt.Sprintf("%s %s %-18s %-30s %-16s", cursor, selected, deleted, title, entry.Task.Topic)
+		line := fmt.Sprintf("%s %s %-18s %-30s %-16s", cursor, selected, deleted, title, strings.Join(entry.Task.Topics, ","))
 		if m.mode == modeTrash && m.trashCursor == i {
 			line = m.styles.Selection.Render(line)
 		} else if m.trashSelected != nil && m.trashSelected[i] {
@@ -1225,7 +1225,7 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
 		taskID:    t.ID,
 		title:     t.Title,
-		topic:     t.Topic,
+		topic:     strings.Join(t.Topics, ","),
 		tags:      t.Tags,
 		priority:  fmt.Sprintf("%d", t.Priority),
 		due:       formatDate(t.Due),
@@ -1367,7 +1367,7 @@ func (m *Model) applyMetaInputSanitizer() {
 }
 
 func metaFields() []string {
-	return []string{"title", "topic", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurrence", "interval", "recurring (y/n)"}
+	return []string{"title", "topics (csv)", "tags", "priority", "due date (YYYY-MM-DD)", "start date (YYYY-MM-DD)", "recurrence", "interval", "recurring (y/n)"}
 }
 
 func (ms metaState) currentLabel() string {
@@ -1738,6 +1738,7 @@ func (m Model) renderMetadataPanel() string {
 	}
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Title     : "), task.Title))
+	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Topics    : "), emptyPlaceholder(strings.Join(task.Topics, ", "))))
 	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Tags      : "), emptyPlaceholder(task.Tags)))
 	b.WriteString(fmt.Sprintf("%s%d\n", m.styles.Muted.Render("Priority  : "), task.Priority))
 	b.WriteString(fmt.Sprintf("%s%s\n", m.styles.Muted.Render("Start     : "), defaultStart(task)))
@@ -2744,7 +2745,7 @@ func (m Model) defaultVisibleItems() []listItem {
 			items = append(items, listItem{kind: itemTopic, topic: topic})
 		}
 		for _, t := range m.tasks {
-			if strings.TrimSpace(t.Topic) == "" {
+			if len(t.Topics) == 0 {
 				items = append(items, listItem{kind: itemTask, task: t})
 			}
 		}
@@ -2762,7 +2763,7 @@ func (m Model) defaultVisibleItems() []listItem {
 		}
 	default:
 		for _, t := range m.tasks {
-			if t.Topic == m.currentTopic {
+			if taskHasTopic(t, m.currentTopic) {
 				items = append(items, listItem{kind: itemTask, task: t})
 			}
 		}
@@ -2785,7 +2786,7 @@ func (m Model) searchItems() []listItem {
 		candidates = m.recentlyDone(m.recentLimit)
 	case m.currentTopic != "":
 		for _, t := range m.tasks {
-			if t.Topic == m.currentTopic {
+			if taskHasTopic(t, m.currentTopic) {
 				candidates = append(candidates, t)
 			}
 		}
@@ -2794,7 +2795,7 @@ func (m Model) searchItems() []listItem {
 	}
 	for _, t := range candidates {
 		if taskMatchesQuery(t, q) {
-			items = append(items, listItem{kind: itemTask, task: t, topic: t.Topic})
+			items = append(items, listItem{kind: itemTask, task: t, topic: strings.Join(t.Topics, ",")})
 		}
 	}
 	return items
@@ -2805,7 +2806,7 @@ func (m Model) searchActive() bool {
 }
 
 func taskMatchesQuery(t storage.Task, query string) bool {
-	fields := []string{t.Title, t.Topic, t.Tags}
+	fields := []string{t.Title, strings.Join(t.Topics, " "), t.Tags}
 	if t.Due.Valid {
 		fields = append(fields, t.Due.Time.Format("2006-01-02"))
 	}
@@ -2817,6 +2818,36 @@ func taskMatchesQuery(t storage.Task, query string) bool {
 	return false
 }
 
+func taskHasTopic(t storage.Task, topic string) bool {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return false
+	}
+	for _, tpc := range t.Topics {
+		if tpc == topic {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueTopics(topics []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		topic = strings.TrimSpace(topic)
+		if topic == "" {
+			continue
+		}
+		if _, ok := seen[topic]; ok {
+			continue
+		}
+		seen[topic] = struct{}{}
+		out = append(out, topic)
+	}
+	return out
+}
+
 func (m Model) topicCounts() map[string]int {
 	counts := make(map[string]int)
 	now := time.Now()
@@ -2824,11 +2855,12 @@ func (m Model) topicCounts() map[string]int {
 		if t.Done || !t.Due.Valid || !now.After(t.Due.Time) {
 			continue
 		}
-		topic := strings.TrimSpace(t.Topic)
-		if topic == "" {
+		if len(t.Topics) == 0 {
 			continue
 		}
-		counts[topic]++
+		for _, topic := range uniqueTopics(t.Topics) {
+			counts[topic]++
+		}
 	}
 	// virtual topics (overdue only)
 	counts["RecentlyAdded"] = m.countOverdue(m.recentlyAdded(m.recentLimit))
@@ -2839,11 +2871,12 @@ func (m Model) topicCounts() map[string]int {
 func (m Model) sortedTopics() []string {
 	set := map[string]struct{}{}
 	for _, t := range m.tasks {
-		topic := strings.TrimSpace(t.Topic)
-		if topic == "" {
+		if len(t.Topics) == 0 {
 			continue
 		}
-		set[topic] = struct{}{}
+		for _, topic := range uniqueTopics(t.Topics) {
+			set[topic] = struct{}{}
+		}
 	}
 	topics := make([]string, 0, len(set))
 	for k := range set {
