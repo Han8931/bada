@@ -1,4 +1,4 @@
-db_path = "todo.db"
+db_path = "bada.db"
 default_filter = "all"
 trash_dir = "trash"
 

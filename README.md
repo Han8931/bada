@@ -22,6 +22,25 @@
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview (works for tasks or topic rows; not available for RecentlyAdded/RecentlyDone).
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 
+## Recurrence Syntax
+
+You can set recurrence in the metadata editor using the `Recurrence` and `Interval` fields.
+
+Examples:
+
+- `every day`
+- `every 3 days`
+- `every 2 weeks`
+- `every 2 weeks on Mon`
+- `every month`
+- `every month on Fri`
+- `daily`, `weekly`, `monthly` (aliases)
+
+Notes:
+- Weekday names accept short and long forms: `Mon`/`Monday`, `Tue`/`Tuesday`, etc.
+- If `Recurrence` is empty but `Interval` is set, it is treated as `every N days`.
+- The UI shows a “Next: YYYY-MM-DD” preview for recurring tasks.
+
 ## Theme
 
 Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to customize colors for headings, accents, status bar, and selection highlight.
@@ -48,15 +67,25 @@ Options:
 # Todo
 
 ## Basic Features
+
+* Timezone setting
 * Agenda reporting config (+7 or +3)
 * **Temporal Views:** A traditional list view plus a **Calendar/Gantt view** to visualize deadlines.
 * **Batch Operations:** A "Visual Block" mode (similar to Vim) for bulk editing, moving, or deleting tasks.
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * Integrate with Gorae / Bori
 
-## UI
-* Markdown view
-* 
+### Recurring Task
+
+**Recurrence needs some NLP feature to parse and calculate next due date**
+
+- Clearer input model: Allow every X days/weeks/months + optional weekday selector (e.g., every 2 weeks on Mon), while keeping a raw rule fallback.
+- Next occurrence preview: Show “Next: YYYY‑MM‑DD” in metadata and in the recurring list so users trust the schedule.
+- Skip/shift controls: Add ]/[ to shift next occurrence and a s key to skip just one cycle.
+- Completion behavior toggle: Choose whether completing a recurring task creates a new instance or just updates the due date in place.
+- End conditions: Support “until date” or “after N occurrences.”
+- Exception dates: Let users add one‑off skip dates (holidays, vacations).
+- Human‑readable labels: Store a normalized rule and a display label (e.g., weekly:mon,wed → “Weekly on Mon/Wed”).
 
 ## AI Features
 
