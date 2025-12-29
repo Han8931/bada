@@ -114,11 +114,13 @@ type Model struct {
 	notePending   noteTarget
 	confirmDel    bool
 	pendingDel    *storage.Task
+	pendingBatch  []storage.Task
 	confirmTopic  bool
 	pendingTopic  string
 	trashSelected map[int]bool
 	trashConfirm  bool
 	trashPending  []storage.TrashEntry
+	selectedTasks map[int]bool
 	meta          *metaState
 	note          *noteState
 	renameID      int
@@ -144,6 +146,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 		tasks:         tasks,
 		cursor:        clampCursor(0, len(tasks)),
 		trashSelected: map[int]bool{},
+		selectedTasks: map[int]bool{},
 		status:        "",
 		input:         ti,
 		mode:          modeReport,
@@ -319,7 +322,19 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
 		}
+	case " ":
+		if task, ok := m.currentTask(); ok {
+			m.toggleTaskSelection(task.ID)
+			m.cursor = clampCursor(m.cursor+1, len(m.visibleItems()))
+			return m, nil
+		}
 	case m.cfg.Keys.Delete:
+		if selected := m.selectedTaskList(); len(selected) > 0 {
+			m.confirmDel = true
+			m.pendingBatch = selected
+			m.status = fmt.Sprintf("Delete %d selected task(s)? y/n", len(selected))
+			return m, nil
+		}
 		task, ok := m.currentTask()
 		if !ok {
 			vis := m.visibleItems()
@@ -540,8 +555,34 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 		m.status = "Delete cancelled"
 		m.confirmDel = false
 		m.pendingDel = nil
+		m.pendingBatch = nil
 		return m, nil
 	case "y", "Y":
+		if len(m.pendingBatch) > 0 {
+			deleted := 0
+			for _, task := range m.pendingBatch {
+				if err := m.store.DeleteTask(task.ID); err != nil {
+					m.status = fmt.Sprintf("delete failed: %v", err)
+					m.confirmDel = false
+					m.pendingBatch = nil
+					return m, nil
+				}
+				deleted++
+			}
+			var errReload error
+			m.tasks, errReload = m.store.FetchTasks()
+			if errReload == nil {
+				m.sortTasks()
+				m.cursor = clampCursor(m.cursor, len(m.visibleItems()))
+				m.status = fmt.Sprintf("Deleted %d task(s) (moved to trash)", deleted)
+				m.selectedTasks = map[int]bool{}
+			} else {
+				m.status = fmt.Sprintf("reload failed: %v", errReload)
+			}
+			m.confirmDel = false
+			m.pendingBatch = nil
+			return m, nil
+		}
 		if m.pendingDel == nil {
 			// delete all done
 			n, err := m.store.DeleteDoneTasks()
@@ -866,8 +907,39 @@ func (m Model) confirmPurgeTrash() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) toggleTaskSelection(taskID int) {
+	if m.selectedTasks == nil {
+		m.selectedTasks = map[int]bool{}
+	}
+	if m.selectedTasks[taskID] {
+		delete(m.selectedTasks, taskID)
+		return
+	}
+	m.selectedTasks[taskID] = true
+}
+
+func (m Model) isTaskSelected(taskID int) bool {
+	if m.selectedTasks == nil {
+		return false
+	}
+	return m.selectedTasks[taskID]
+}
+
+func (m Model) selectedTaskList() []storage.Task {
+	if len(m.selectedTasks) == 0 {
+		return nil
+	}
+	selected := make([]storage.Task, 0, len(m.selectedTasks))
+	for _, t := range m.tasks {
+		if m.selectedTasks[t.ID] {
+			selected = append(selected, t)
+		}
+	}
+	return selected
+}
+
 func renderHelp(k config.Keymap) string {
-	return fmt.Sprintf("%s/%s move • %s add • %s/%s detail • %s toggle • %s delete • %s edit • %s notes • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
+	return fmt.Sprintf("%s/%s move • %s add • space select • %s/%s detail • %s done • %s purge • %s edit • %s notes • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
 		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.NoteView, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Search, k.Quit)
 }
 
@@ -947,6 +1019,8 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 			}
 			if m.cursor == i && m.mode == modeList {
 				body = m.styles.Selection.Render(body)
+			} else if m.isTaskSelected(it.task.ID) {
+				body = m.styles.Warning.Render(body)
 			} else if it.task.Done {
 				body = m.styles.Done.Render(body)
 			}
@@ -1088,8 +1162,8 @@ func (m Model) renderNoteView() string {
 		m.styles.Heading.Render("Notes: ") + m.styles.Accent.Render(m.note.target.label()),
 		"",
 	}
-	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit, d to delete",
-		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit))
+	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit, %s to purge",
+		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit, m.cfg.Keys.Delete))
 
 	bodyLines := m.noteBodyLines()
 	available := m.noteAvailableHeight()
