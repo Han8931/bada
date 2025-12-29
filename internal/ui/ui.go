@@ -434,7 +434,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			info += fmt.Sprintf(" • priority:%d", task.Priority)
 		}
 		if task.Due.Valid {
-			info += " • due:" + task.Due.Time.Format("2006-01-02") + overdueDetail(task)
+			info += " • due:" + formatDateTime(task.Due) + overdueDetail(task)
 		}
 		if task.Start.Valid {
 			info += " • start:" + task.Start.Time.Format("2006-01-02")
@@ -1221,7 +1221,7 @@ func (m Model) renderCalendarDayList() string {
 	for _, t := range tasks {
 		due := "no due"
 		if t.Due.Valid {
-			due = formatDate(t.Due)
+			due = formatDateTime(t.Due)
 		}
 		line := fmt.Sprintf("  • #%d %-40s  %s", t.ID, truncateText(t.Title, 40), due)
 		if rec := recurrenceSummary(t); rec != "" {
@@ -2227,7 +2227,7 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 		topic:     strings.Join(t.Topics, ","),
 		tags:      t.Tags,
 		priority:  fmt.Sprintf("%d", t.Priority),
-		due:       formatDate(t.Due),
+		due:       formatDateTime(t.Due),
 		start:     defaultStart(t),
 		timezone:  defaultTimezone(t.Timezone),
 		rule:      t.RecurrenceRule,
@@ -2389,7 +2389,9 @@ func (m *Model) applyMetaInputSanitizer() {
 	switch m.meta.index {
 	case 3: // priority
 		m.input.SetValue(filterDigits(m.input.Value()))
-	case 4, 5: // dates
+	case 4: // due datetime
+		m.input.SetValue(filterDateTime(m.input.Value()))
+	case 5: // start date
 		m.input.SetValue(filterDate(m.input.Value()))
 	case 6: // timezone
 		m.input.SetValue(filterTimezone(m.input.Value()))
@@ -2407,7 +2409,7 @@ func metaFields() []string {
 		"Topics (CSV)",
 		"Tags",
 		"Priority",
-		"Due Date (YYYY-MM-DD)",
+		"Due (YYYY-MM-DD or YYYY-MM-DD HH:MM)",
 		"Start Date (YYYY-MM-DD)",
 		"Timezone (UTC±HH:MM)",
 		"Recurrence",
@@ -2505,7 +2507,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		m.status = fmt.Sprintf("priority invalid: %v", err)
 		return m, nil
 	}
-	due, err := parseDate(m.meta.due)
+	due, err := parseDateTime(m.meta.due)
 	if err != nil {
 		m.status = fmt.Sprintf("due date invalid: %v", err)
 		return m, nil
@@ -2599,6 +2601,20 @@ func parseDate(v string) (sql.NullTime, error) {
 	return sql.NullTime{Time: t, Valid: true}, nil
 }
 
+func parseDateTime(v string) (sql.NullTime, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return sql.NullTime{}, nil
+	}
+	layouts := []string{"2006-01-02 15:04", "2006-01-02"}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, v); err == nil {
+			return sql.NullTime{Time: t, Valid: true}, nil
+		}
+	}
+	return sql.NullTime{}, fmt.Errorf("expected YYYY-MM-DD or YYYY-MM-DD HH:MM")
+}
+
 func formatDate(t sql.NullTime) string {
 	if !t.Valid {
 		return ""
@@ -2606,9 +2622,19 @@ func formatDate(t sql.NullTime) string {
 	return t.Time.Format("2006-01-02")
 }
 
+func formatDateTime(t sql.NullTime) string {
+	if !t.Valid {
+		return ""
+	}
+	if t.Time.Hour() == 0 && t.Time.Minute() == 0 && t.Time.Second() == 0 {
+		return t.Time.Format("2006-01-02")
+	}
+	return t.Time.Format("2006-01-02 15:04")
+}
+
 func displayDate(t sql.NullTime) string {
 	if t.Valid {
-		return formatDate(t)
+		return formatDateTime(t)
 	}
 	return "Unknown"
 }
@@ -2733,7 +2759,7 @@ func (m *Model) refreshReport() {
 				return
 			}
 			for _, t := range tasks {
-				due := formatDate(t.Due)
+				due := formatDateTime(t.Due)
 				line := fmt.Sprintf("  • #%d %-40s  due %s", t.ID, truncateText(t.Title, 40), due)
 				b.WriteString(style.Render(line))
 				b.WriteString("\n")
@@ -2755,7 +2781,7 @@ func (m *Model) refreshReport() {
 		for _, t := range recurring {
 			due := "no due"
 			if t.Due.Valid {
-				due = fmt.Sprintf("due %s", formatDate(t.Due))
+				due = fmt.Sprintf("due %s", formatDateTime(t.Due))
 			}
 			next := ""
 			if nextDate, ok := nextRecurrenceDate(t); ok {
@@ -4059,6 +4085,19 @@ func filterDate(v string) string {
 	return b.String()
 }
 
+func filterDateTime(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if (r >= '0' && r <= '9') || r == '-' || r == ':' || r == ' ' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 16 {
+			break
+		}
+	}
+	return b.String()
+}
+
 func filterYN(v string) string {
 	if v == "" {
 		return ""
@@ -4311,7 +4350,7 @@ func (m Model) searchActive() bool {
 func taskMatchesQuery(t storage.Task, query string) bool {
 	fields := []string{t.Title, strings.Join(t.Topics, " "), t.Tags}
 	if t.Due.Valid {
-		fields = append(fields, t.Due.Time.Format("2006-01-02"))
+		fields = append(fields, formatDateTime(t.Due))
 	}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), query) {
