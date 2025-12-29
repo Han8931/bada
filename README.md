@@ -69,7 +69,6 @@ Options:
 ## Basic Features
 
 * Agenda reporting config (+7 or +3)
-* The note view presents tags and so on too. 
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * Integrate with Gorae / Bori
 
