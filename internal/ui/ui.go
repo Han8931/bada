@@ -34,6 +34,7 @@ const (
 	modeReport
 	modeCalendar
 	modeHelp
+	modeGantt
 )
 
 type noteKind int
@@ -77,17 +78,18 @@ type uiStyles struct {
 }
 
 type metaState struct {
-	taskID   int
-	title    string
-	topic    string
-	tags     string
-	priority string
-	due      string
-	start    string
-	timezone string
-	rule     string
-	interval string
-	index    int
+	taskID    int
+	title     string
+	topic     string
+	tags      string
+	priority  string
+	due       string
+	start     string
+	timezone  string
+	rule      string
+	interval  string
+	recurring bool
+	index     int
 }
 
 type Model struct {
@@ -134,6 +136,7 @@ type Model struct {
 	calendarDay    time.Time
 	calendarDetail bool
 	helpScroll     int
+	ganttScroll    int
 }
 
 func Run(store *storage.Store, cfg config.Config) error {
@@ -195,6 +198,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeHelp {
 			return m.updateHelpMode(msg.String())
+		}
+		if m.mode == modeGantt {
+			return m.updateGanttMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -516,6 +522,11 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
+	if m.mode == modeGantt {
+		b.WriteString(m.renderGanttView())
+		return m.fillView(b.String())
+	}
+
 	header := m.renderListBanner() + "\n"
 	gap := "\n"
 	divider := m.styles.Border.Render(m.ruleLine(m.taskListLineWidth())) + "\n"
@@ -741,6 +752,13 @@ func (m Model) enterHelpView() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) enterGanttView() (tea.Model, tea.Cmd) {
+	m.mode = modeGantt
+	m.ganttScroll = 0
+	m.status = "Gantt view"
+	return m, nil
+}
+
 func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.trashConfirm {
 		switch key {
@@ -877,6 +895,24 @@ func (m Model) updateHelpMode(key string) (tea.Model, tea.Cmd) {
 		}
 	case m.cfg.Keys.Down, "down":
 		m.helpScroll = clampInt(m.helpScroll+1, 0, m.helpMaxScroll())
+	default:
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) updateGanttMode(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", m.cfg.Keys.Quit, "q":
+		m.mode = modeList
+		m.status = "Gantt closed"
+		return m, nil
+	case m.cfg.Keys.Up, "up":
+		if m.ganttScroll > 0 {
+			m.ganttScroll--
+		}
+	case m.cfg.Keys.Down, "down":
+		m.ganttScroll = clampInt(m.ganttScroll+1, 0, m.ganttMaxScroll())
 	default:
 		return m, nil
 	}
@@ -1392,6 +1428,215 @@ func (m Model) renderHelpBody(maxLines int) string {
 	return strings.Join(lines[scroll:end], "\n")
 }
 
+func (m Model) renderGanttView() string {
+	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
+	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
+	bodyMax := 0
+	if m.height > 0 {
+		bodyMax = m.height - 1 - countLines(header) - countLines(footer)
+		if bodyMax < 0 {
+			bodyMax = 0
+		}
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	if m.height > 0 {
+		b.WriteString(m.renderGanttBody(bodyMax))
+	} else {
+		b.WriteString(m.ganttContent())
+	}
+	b.WriteString("\n")
+	b.WriteString(footer)
+	return b.String()
+}
+
+func (m Model) ganttContent() string {
+	rows := m.ganttRows()
+	if len(rows) == 0 {
+		return m.styles.Muted.Render("(no tasks with due dates)")
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) ganttMaxScroll() int {
+	if m.height <= 0 {
+		return 0
+	}
+	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
+	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
+	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
+	if bodyMax <= 0 {
+		return 0
+	}
+	rows := m.ganttRows()
+	if len(rows) <= bodyMax {
+		return 0
+	}
+	return len(rows) - bodyMax
+}
+
+func (m Model) renderGanttBody(maxLines int) string {
+	rows := m.ganttRows()
+	if maxLines <= 0 || len(rows) == 0 {
+		return ""
+	}
+	maxScroll := len(rows) - maxLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := clampInt(m.ganttScroll, 0, maxScroll)
+	end := scroll + maxLines
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return strings.Join(rows[scroll:end], "\n")
+}
+
+func (m Model) ganttRows() []string {
+	type ganttItem struct {
+		task  storage.Task
+		start time.Time
+		due   time.Time
+	}
+	items := make([]ganttItem, 0)
+	for _, t := range m.tasks {
+		if t.Done || !t.Due.Valid {
+			continue
+		}
+		start := t.CreatedAt
+		if t.Start.Valid {
+			start = t.Start.Time
+		}
+		start = normalizeDate(start)
+		due := normalizeDate(t.Due.Time)
+		if due.Before(start) {
+			start = due
+		}
+		items = append(items, ganttItem{task: t, start: start, due: due})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].start.Equal(items[j].start) {
+			return items[i].due.Before(items[j].due)
+		}
+		return items[i].start.Before(items[j].start)
+	})
+	minDate := items[0].start
+	maxDate := items[0].due
+	for _, it := range items[1:] {
+		if it.start.Before(minDate) {
+			minDate = it.start
+		}
+		if it.due.After(maxDate) {
+			maxDate = it.due
+		}
+	}
+	spanDays := int(maxDate.Sub(minDate).Hours()/24) + 1
+	if spanDays < 1 {
+		spanDays = 1
+	}
+	barWidth := 40
+	if m.width > 0 {
+		barWidth = clampInt(m.width-52, 20, 60)
+	}
+	rows := make([]string, 0, len(items)+2)
+	scaleLine, labelLine := renderGanttScaleLines(minDate, spanDays, barWidth)
+	header := fmt.Sprintf("%-4s %-24s %-10s %-10s %s", "ID", "Title", "Start", "Due", scaleLine)
+	label := fmt.Sprintf("%-4s %-24s %-10s %-10s %s", "", "", "", "", labelLine)
+	rows = append(rows, m.styles.Border.Render(header))
+	rows = append(rows, m.styles.Border.Render(label))
+	today := normalizeDate(time.Now())
+	for _, it := range items {
+		title := truncateText(it.task.Title, 24)
+		bar := renderGanttBar(minDate, spanDays, barWidth, it.start, it.due, today)
+		line := fmt.Sprintf("%-4d %-24s %-10s %-10s %s", it.task.ID, title, it.start.Format("2006-01-02"), it.due.Format("2006-01-02"), bar)
+		rows = append(rows, line)
+	}
+	return rows
+}
+
+func renderGanttScaleLines(start time.Time, spanDays, width int) (string, string) {
+	if width <= 0 {
+		return "", ""
+	}
+	if spanDays <= 1 {
+		return strings.Repeat("─", width), padRight(start.Format("Jan _2"), width)
+	}
+	scaleRunes := []rune(strings.Repeat("─", width))
+	for d := 0; d <= spanDays; d += 7 {
+		pos := (d * width) / spanDays
+		if pos >= width {
+			pos = width - 1
+		}
+		scaleRunes[pos] = '┬'
+	}
+	scaleLine := string(scaleRunes)
+	labelLine := renderGanttLabelLine(start, spanDays, width)
+	return scaleLine, labelLine
+}
+
+func renderGanttLabelLine(start time.Time, spanDays, width int) string {
+	positions := []int{0, width / 2, width - 6}
+	labels := []string{
+		start.Format("Jan _2"),
+		start.AddDate(0, 0, spanDays/2).Format("Jan _2"),
+		start.AddDate(0, 0, spanDays).Format("Jan _2"),
+	}
+	line := []rune(strings.Repeat(" ", width))
+	for i, pos := range positions {
+		if pos < 0 || pos >= width {
+			continue
+		}
+		label := []rune(labels[i])
+		for j := 0; j < len(label) && pos+j < width; j++ {
+			line[pos+j] = label[j]
+		}
+	}
+	return string(line)
+}
+
+func renderGanttBar(start time.Time, spanDays, width int, taskStart, taskDue, today time.Time) string {
+	if width <= 0 {
+		return ""
+	}
+	startOffset := int(taskStart.Sub(start).Hours() / 24)
+	endOffset := int(taskDue.Sub(start).Hours() / 24)
+	if startOffset < 0 {
+		startOffset = 0
+	}
+	if endOffset < startOffset {
+		endOffset = startOffset
+	}
+	if endOffset >= spanDays {
+		endOffset = spanDays - 1
+	}
+	startPos := (startOffset * width) / spanDays
+	endPos := (endOffset * width) / spanDays
+	if endPos < startPos {
+		endPos = startPos
+	}
+	todayOffset := int(today.Sub(start).Hours() / 24)
+	todayPos := (todayOffset * width) / spanDays
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		switch {
+		case i == startPos || i == endPos:
+			b.WriteRune('│')
+		case i > startPos && i < endPos:
+			b.WriteRune('─')
+		default:
+			b.WriteRune(' ')
+		}
+	}
+	bar := []rune(b.String())
+	if todayPos >= 0 && todayPos < width {
+		bar[todayPos] = '•'
+	}
+	return string(bar)
+}
+
 func renderHelp(k config.Keymap) string {
 	return fmt.Sprintf("%s/%s move • %s add • space select • %s/%s detail • %s done • %s purge • %s edit • %s notes • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
 		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.NoteView, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Search, k.Quit)
@@ -1819,17 +2064,18 @@ func (t noteTarget) matches(other noteTarget) bool {
 
 func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
-		taskID:   t.ID,
-		title:    t.Title,
-		topic:    strings.Join(t.Topics, ","),
-		tags:     t.Tags,
-		priority: fmt.Sprintf("%d", t.Priority),
-		due:      formatDate(t.Due),
-		start:    defaultStart(t),
-		timezone: defaultTimezone(t.Timezone),
-		rule:     t.RecurrenceRule,
-		interval: intervalString(t.RecurrenceInterval),
-		index:    0,
+		taskID:    t.ID,
+		title:     t.Title,
+		topic:     strings.Join(t.Topics, ","),
+		tags:      t.Tags,
+		priority:  fmt.Sprintf("%d", t.Priority),
+		due:       formatDate(t.Due),
+		start:     defaultStart(t),
+		timezone:  defaultTimezone(t.Timezone),
+		rule:      t.RecurrenceRule,
+		interval:  intervalString(t.RecurrenceInterval),
+		recurring: t.Recurring,
+		index:     0,
 	}
 	m.input.SetValue(m.meta.currentValue())
 	m.input.CursorEnd()
@@ -1842,17 +2088,18 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 
 func (m Model) startMetadataAdd() (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
-		taskID:   0,
-		title:    "",
-		topic:    "",
-		tags:     "",
-		priority: "",
-		due:      "",
-		start:    "",
-		timezone: defaultTimezone(""),
-		rule:     "",
-		interval: "",
-		index:    0,
+		taskID:    0,
+		title:     "",
+		topic:     "",
+		tags:      "",
+		priority:  "",
+		due:       "",
+		start:     "",
+		timezone:  defaultTimezone(""),
+		rule:      "",
+		interval:  "",
+		recurring: false,
+		index:     0,
 	}
 	m.input.SetValue(m.meta.currentValue())
 	m.input.CursorEnd()
@@ -2120,13 +2367,21 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		interval = 0
 		recurring = true
 	}
+	if strings.EqualFold(ruleInput, "none") || strings.EqualFold(ruleInput, "off") {
+		rule = ""
+		interval = 0
+		recurring = false
+	}
 	if strings.TrimSpace(rule) == "" || strings.EqualFold(rule, "none") {
 		if interval > 0 {
 			rule = fmt.Sprintf("every %d days", interval)
 			interval = 0
 		} else {
-			rule = "none"
+			rule = ""
 		}
+	}
+	if !recurring && m.meta.taskID != 0 && m.meta.recurring {
+		recurring = true
 	}
 
 	if taskID == 0 {
@@ -2869,6 +3124,8 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			return m.enterReportView()
 		case "calendar":
 			return m.enterCalendarView()
+		case "gantt":
+			return m.enterGanttView()
 		default:
 			m.status = fmt.Sprintf("unknown command: %s", cmd)
 		}
@@ -2884,7 +3141,7 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 
 func completeCommand(input string) string {
 	cmd := strings.ToLower(strings.TrimSpace(input))
-	commands := []string{"agenda", "calendar", "help"}
+	commands := []string{"agenda", "calendar", "gantt", "help"}
 	if cmd == "" {
 		return commands[0]
 	}
