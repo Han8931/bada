@@ -121,6 +121,7 @@ type Model struct {
 	pendingDel     *storage.Task
 	pendingBatch   []storage.Task
 	reportScroll   int
+	trashScroll    int
 	confirmTopic   bool
 	pendingTopic   string
 	trashSelected  map[int]bool
@@ -522,6 +523,11 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
+	if m.mode == modeTrash {
+		b.WriteString(m.renderTrashView())
+		return m.fillView(b.String())
+	}
+
 	if m.mode == modeGantt {
 		b.WriteString(m.renderGanttView())
 		return m.fillView(b.String())
@@ -570,11 +576,6 @@ func (m Model) renderFooterPanel() string {
 	switch m.mode {
 	case modeReport:
 		return m.styles.Muted.Render("Press enter/esc/q to close, : for commands")
-	case modeTrash:
-		b.WriteString(m.styles.Heading.Render("Trash (space to select, u to restore, esc to exit)"))
-		b.WriteString("\n\n")
-		b.WriteString(m.renderTrashList())
-		return b.String()
 	case modeAdd:
 		b.WriteString(m.styles.Heading.Render("Add task: "))
 		b.WriteString(m.input.View())
@@ -597,6 +598,29 @@ func (m Model) renderFooterPanel() string {
 	default:
 		return m.renderMetadataPanel()
 	}
+}
+
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	line := words[0]
+	for _, word := range words[1:] {
+		if len(line)+1+len(word) > width {
+			b.WriteString(line)
+			b.WriteString("\n")
+			line = word
+			continue
+		}
+		line += " " + word
+	}
+	b.WriteString(line)
+	return b.String()
 }
 
 func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
@@ -722,8 +746,10 @@ func (m Model) enterTrashView() (tea.Model, tea.Cmd) {
 	m.trash = entries
 	m.trashSelected = map[int]bool{}
 	m.trashCursor = clampCursor(0, len(entries))
+	m.trashScroll = 0
 	m.mode = modeTrash
 	m.status = fmt.Sprintf("Trash: %d item(s). space to select, u to restore, P to purge, esc to exit", len(entries))
+	m.adjustTrashScroll()
 	return m, nil
 }
 
@@ -778,6 +804,7 @@ func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 			}
 			m.trashConfirm = false
 			m.trashPending = nil
+			m.adjustTrashScroll()
 			return m, nil
 		case "n", "N", "esc":
 			m.trashConfirm = false
@@ -817,10 +844,14 @@ func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case "P":
 		return m.confirmPurgeTrash()
 	}
+	m.adjustTrashScroll()
 	return m, nil
 }
 
 func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.processScrollKey(key, m.reportMaxScroll(), &m.reportScroll) {
+		return m, nil
+	}
 	switch key {
 	case "esc", "enter", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
@@ -884,6 +915,9 @@ func (m Model) updateCalendarMode(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateHelpMode(key string) (tea.Model, tea.Cmd) {
+	if m.processScrollKey(key, m.helpMaxScroll(), &m.helpScroll) {
+		return m, nil
+	}
 	switch key {
 	case "esc", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
@@ -902,6 +936,9 @@ func (m Model) updateHelpMode(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateGanttMode(key string) (tea.Model, tea.Cmd) {
+	if m.processScrollKey(key, m.ganttMaxScroll(), &m.ganttScroll) {
+		return m, nil
+	}
 	switch key {
 	case "esc", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
@@ -1017,6 +1054,7 @@ func (m Model) restoreTrashSelection() (tea.Model, tea.Cmd) {
 	}
 	m.trashSelected = map[int]bool{}
 	m.trashCursor = clampCursor(m.trashCursor, len(m.trash))
+	m.adjustTrashScroll()
 	m.tasks, err = m.store.FetchTasks()
 	if err == nil {
 		m.sortTasks()
@@ -1428,8 +1466,130 @@ func (m Model) renderHelpBody(maxLines int) string {
 	return strings.Join(lines[scroll:end], "\n")
 }
 
+func (m Model) renderTrashView() string {
+	header := m.trashViewHeader()
+	footer := m.trashViewFooter()
+	bodyMax := 0
+	if m.height > 0 {
+		bodyMax = m.height - 1 - countLines(header) - countLines(footer)
+		if bodyMax < 0 {
+			bodyMax = 0
+		}
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	if m.height > 0 {
+		b.WriteString(m.renderTrashBody(bodyMax))
+	} else {
+		b.WriteString(m.renderTrashContent())
+	}
+	b.WriteString("\n")
+	b.WriteString(footer)
+	return b.String()
+}
+
+func (m Model) trashViewHeader() string {
+	title := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("# Trash") + "\n\n"
+	return title + m.renderTrashHeaderLines() + "\n"
+}
+
+func (m Model) trashViewFooter() string {
+	return m.styles.Muted.Render("up/down scroll • space select • u restore • P purge • esc/q close")
+}
+
+func (m Model) renderTrashHeaderLines() string {
+	header := "   🗑 DeletedAt         Title                          Topics"
+	lineWidth := len(header)
+	if m.width > lineWidth {
+		lineWidth = m.width
+	}
+	line := m.styles.Heading.Render(header)
+	rule := m.styles.Border.Render(m.ruleLine(lineWidth))
+	return line + "\n" + rule
+}
+
+func (m Model) renderTrashContent() string {
+	rows := m.trashRows()
+	if len(rows) == 0 {
+		return m.styles.Muted.Render("(trash is empty)")
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) renderTrashBody(maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	rows := m.trashRows()
+	if len(rows) == 0 {
+		return m.styles.Muted.Render("(trash is empty)")
+	}
+	maxScroll := len(rows) - maxLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := clampInt(m.trashScroll, 0, maxScroll)
+	end := scroll + maxLines
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return strings.Join(rows[scroll:end], "\n")
+}
+
+func (m Model) trashRows() []string {
+	rows := make([]string, 0, len(m.trash))
+	for i, entry := range m.trash {
+		cursor := " "
+		title := entry.Task.Title
+		if len(title) > 30 {
+			title = title[:30]
+		}
+		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
+		line := fmt.Sprintf("%s 🗑 %-18s %-30s %-16s", cursor, deleted, title, strings.Join(entry.Task.Topics, ","))
+		if m.mode == modeTrash && m.trashCursor == i {
+			line = m.styles.Selection.Render(line)
+		} else if m.trashSelected != nil && m.trashSelected[i] {
+			line = m.styles.Accent.Render(line)
+		}
+		rows = append(rows, line)
+	}
+	return rows
+}
+
+func (m Model) trashBodyMaxLines() int {
+	if m.height <= 0 {
+		return 0
+	}
+	header := m.trashViewHeader()
+	footer := m.trashViewFooter()
+	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
+	if bodyMax < 0 {
+		bodyMax = 0
+	}
+	return bodyMax
+}
+
+func (m *Model) adjustTrashScroll() {
+	bodyMax := m.trashBodyMaxLines()
+	if bodyMax <= 0 {
+		m.trashScroll = 0
+		return
+	}
+	maxScroll := len(m.trash) - bodyMax
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.trashCursor < m.trashScroll {
+		m.trashScroll = m.trashCursor
+	} else if m.trashCursor >= m.trashScroll+bodyMax {
+		m.trashScroll = m.trashCursor - bodyMax + 1
+	}
+	m.trashScroll = clampInt(m.trashScroll, 0, maxScroll)
+}
+
 func (m Model) renderGanttView() string {
-	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
+	title := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
+	header := title + m.renderGanttHeaderLines() + "\n"
 	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
 	bodyMax := 0
 	if m.height > 0 {
@@ -1450,6 +1610,23 @@ func (m Model) renderGanttView() string {
 	return b.String()
 }
 
+func (m Model) renderGanttHeaderLines() string {
+	_, header := m.ganttDataRowsWithHeader()
+	if strings.TrimSpace(header) == "" {
+		return ""
+	}
+	parts := strings.Split(header, "\n")
+	lines := make([]string, 0, len(parts))
+	for i, part := range parts {
+		if i == 0 {
+			lines = append(lines, m.styles.Heading.Render(part))
+			continue
+		}
+		lines = append(lines, m.styles.Border.Render(part))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Model) ganttContent() string {
 	rows := m.ganttRows()
 	if len(rows) == 0 {
@@ -1462,7 +1639,8 @@ func (m Model) ganttMaxScroll() int {
 	if m.height <= 0 {
 		return 0
 	}
-	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
+	title := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
+	header := title + m.renderGanttHeaderLines() + "\n"
 	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
 	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
 	if bodyMax <= 0 {
@@ -1477,8 +1655,11 @@ func (m Model) ganttMaxScroll() int {
 
 func (m Model) renderGanttBody(maxLines int) string {
 	rows := m.ganttRows()
-	if maxLines <= 0 || len(rows) == 0 {
+	if maxLines <= 0 {
 		return ""
+	}
+	if len(rows) == 0 {
+		return m.styles.Muted.Render("(no tasks with due dates)")
 	}
 	maxScroll := len(rows) - maxLines
 	if maxScroll < 0 {
@@ -1493,6 +1674,11 @@ func (m Model) renderGanttBody(maxLines int) string {
 }
 
 func (m Model) ganttRows() []string {
+	rows, _ := m.ganttDataRowsWithHeader()
+	return rows
+}
+
+func (m Model) ganttDataRowsWithHeader() ([]string, string) {
 	type ganttItem struct {
 		task  storage.Task
 		start time.Time
@@ -1515,7 +1701,13 @@ func (m Model) ganttRows() []string {
 		items = append(items, ganttItem{task: t, start: start, due: due})
 	}
 	if len(items) == 0 {
-		return nil
+		barWidth := 40
+		if m.width > 0 {
+			barWidth = clampInt(m.width-52, 20, 60)
+		}
+		fallbackStart := normalizeDate(time.Now())
+		header := buildGanttHeader(fallbackStart, 14, barWidth)
+		return nil, header
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].start.Equal(items[j].start) {
@@ -1541,12 +1733,8 @@ func (m Model) ganttRows() []string {
 	if m.width > 0 {
 		barWidth = clampInt(m.width-52, 20, 60)
 	}
-	rows := make([]string, 0, len(items)+2)
-	scaleLine, labelLine := renderGanttScaleLines(minDate, spanDays, barWidth)
-	header := fmt.Sprintf("%-4s %-24s %-10s %-10s %s", "ID", "Title", "Start", "Due", scaleLine)
-	label := fmt.Sprintf("%-4s %-24s %-10s %-10s %s", "", "", "", "", labelLine)
-	rows = append(rows, m.styles.Border.Render(header))
-	rows = append(rows, m.styles.Border.Render(label))
+	rows := make([]string, 0, len(items))
+	header := buildGanttHeader(minDate, spanDays, barWidth)
 	today := normalizeDate(time.Now())
 	for _, it := range items {
 		title := truncateText(it.task.Title, 24)
@@ -1554,7 +1742,15 @@ func (m Model) ganttRows() []string {
 		line := fmt.Sprintf("%-4d %-24s %-10s %-10s %s", it.task.ID, title, it.start.Format("2006-01-02"), it.due.Format("2006-01-02"), bar)
 		rows = append(rows, line)
 	}
-	return rows
+	return rows, header
+}
+
+func buildGanttHeader(start time.Time, spanDays, barWidth int) string {
+	scaleLine, labelLine := renderGanttScaleLines(start, spanDays, barWidth)
+	return fmt.Sprintf("%-4s %-24s %-10s %-10s %s\n%-4s %-24s %-10s %-10s %s",
+		"ID", "Title", "Start", "Due", scaleLine,
+		"", "", "", "", labelLine,
+	)
 }
 
 func renderGanttScaleLines(start time.Time, spanDays, width int) (string, string) {
@@ -1762,44 +1958,6 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 
 	lines = append(lines, itemLines...)
 	return strings.Join(lines, "\n")
-}
-
-func (m Model) renderTrashList() string {
-	var b strings.Builder
-	header := "   Sel Deleted            Title                          Topics"
-	lineWidth := len(header)
-	if m.width > lineWidth {
-		lineWidth = m.width
-	}
-	b.WriteString(m.styles.Border.Render(header))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Border.Render(m.ruleLine(lineWidth)))
-	b.WriteString("\n")
-	for i, entry := range m.trash {
-		cursor := " "
-		selected := "[ ]"
-		if m.trashSelected != nil && m.trashSelected[i] {
-			selected = "[*]"
-		}
-		title := entry.Task.Title
-		if len(title) > 30 {
-			title = title[:30]
-		}
-		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
-		line := fmt.Sprintf("%s %s %-18s %-30s %-16s", cursor, selected, deleted, title, strings.Join(entry.Task.Topics, ","))
-		if m.mode == modeTrash && m.trashCursor == i {
-			line = m.styles.Selection.Render(line)
-		} else if m.trashSelected != nil && m.trashSelected[i] {
-			line = m.styles.Accent.Render(line)
-		}
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	if len(m.trash) == 0 {
-		b.WriteString(m.styles.Muted.Render("(trash is empty)"))
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 func (m Model) startNoteView() (tea.Model, tea.Cmd) {
@@ -3840,6 +3998,32 @@ func (m *Model) processNavKey(key string) bool {
 			m.cursor = len(items) - 1
 			m.status = "Bottom"
 		}
+		return true
+	}
+	return false
+}
+
+func (m *Model) processScrollKey(key string, max int, scroll *int) bool {
+	if key == "" {
+		return false
+	}
+	if key == "g" {
+		if m.navBuf == "g" {
+			*scroll = 0
+			m.navBuf = ""
+			m.status = "Top"
+		} else {
+			m.navBuf = "g"
+			m.status = "g (press g for top)"
+		}
+		return true
+	}
+	if m.navBuf == "g" {
+		m.navBuf = ""
+	}
+	if key == "G" {
+		*scroll = max
+		m.status = "Bottom"
 		return true
 	}
 	return false

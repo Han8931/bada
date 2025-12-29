@@ -68,7 +68,7 @@ Options:
 
 ## Basic Features
 
-* Trash dir to recover deleted tasks
+* Date / Time
 * Agenda reporting config (+7 or +3)
 * The note view presents tags and so on too. 
 * **Temporal Views:** A traditional list view plus a **Gantt view** to visualize deadlines.
