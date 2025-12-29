@@ -9,7 +9,7 @@ import (
 
 const (
 	DefaultConfigFileName = "config.toml"
-	DefaultDBName         = "todo.db"
+	DefaultDBName         = "bada.db"
 	DefaultTrashDir       = "trash"
 )
 
