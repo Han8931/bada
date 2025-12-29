@@ -25,6 +25,7 @@ vendor/
 # Local data/config
 config.toml
 todo.db
+bada.db
 
 # Coverage / logs
 coverage.*
