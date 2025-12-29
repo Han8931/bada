@@ -1352,7 +1352,11 @@ func buildStyles(theme config.Theme) uiStyles {
 	styles.Done = applyFg(styles.Done, theme.Muted)
 
 	styles.Selection = applyBg(styles.Selection, theme.SelectionBg)
-	styles.Selection = applyFg(styles.Selection, theme.SelectionFg)
+	selectionFg := theme.SelectionFg
+	if strings.TrimSpace(selectionFg) == "" {
+		selectionFg = theme.StatusFg
+	}
+	styles.Selection = applyFg(styles.Selection, selectionFg)
 
 	styles.Status = applyBg(styles.Status, theme.StatusBg)
 	styles.Status = applyFg(styles.Status, theme.StatusFg)
