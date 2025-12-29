@@ -33,6 +33,7 @@ const (
 	modeNote
 	modeReport
 	modeCalendar
+	modeHelp
 )
 
 type noteKind int
@@ -132,6 +133,7 @@ type Model struct {
 	calendarMonth  time.Time
 	calendarDay    time.Time
 	calendarDetail bool
+	helpScroll     int
 }
 
 func Run(store *storage.Store, cfg config.Config) error {
@@ -190,6 +192,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeCalendar {
 			return m.updateCalendarMode(msg.String())
+		}
+		if m.mode == modeHelp {
+			return m.updateHelpMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -506,6 +511,11 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
+	if m.mode == modeHelp {
+		b.WriteString(m.renderHelpView())
+		return m.fillView(b.String())
+	}
+
 	header := m.renderListBanner() + "\n"
 	gap := "\n"
 	divider := m.styles.Border.Render(m.ruleLine(m.taskListLineWidth())) + "\n"
@@ -724,6 +734,13 @@ func (m Model) enterCalendarView() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) enterHelpView() (tea.Model, tea.Cmd) {
+	m.mode = modeHelp
+	m.helpScroll = 0
+	m.status = "Help"
+	return m, nil
+}
+
 func (m Model) updateTrashMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.trashConfirm {
 		switch key {
@@ -846,6 +863,24 @@ func (m Model) updateCalendarMode(key string) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) updateHelpMode(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", m.cfg.Keys.Quit, "q":
+		m.mode = modeList
+		m.status = "Help closed"
+		return m, nil
+	case m.cfg.Keys.Up, "up":
+		if m.helpScroll > 0 {
+			m.helpScroll--
+		}
+	case m.cfg.Keys.Down, "down":
+		m.helpScroll = clampInt(m.helpScroll+1, 0, m.helpMaxScroll())
+	default:
+		return m, nil
+	}
+	return m, nil
 }
 
 func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
@@ -1247,6 +1282,109 @@ func (m Model) renderReportWithHeight(maxLines int) string {
 		maxScroll = 0
 	}
 	scroll := clampInt(m.reportScroll, 0, maxScroll)
+	end := scroll + maxLines
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return strings.Join(lines[scroll:end], "\n")
+}
+
+func (m Model) renderHelpView() string {
+	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Help") + "\n\n"
+	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
+	bodyMax := 0
+	if m.height > 0 {
+		bodyMax = m.height - 1 - countLines(header) - countLines(footer)
+		if bodyMax < 0 {
+			bodyMax = 0
+		}
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	if m.height > 0 {
+		b.WriteString(m.renderHelpBody(bodyMax))
+	} else {
+		b.WriteString(m.helpContent())
+	}
+	b.WriteString("\n")
+	b.WriteString(footer)
+	return b.String()
+}
+
+func (m Model) helpContent() string {
+	return strings.TrimRight(fmt.Sprintf(`Commands:
+  :agenda    Open reminder report
+  :calendar  Open calendar view
+  :help      Open this help screen
+
+List Navigation:
+  %s/%s  Move cursor
+  %s     Rename
+  %s     Search
+  %s     Quit
+  gg/G   Jump to top/bottom
+
+Tasks:
+  %s     Add task (opens metadata editor)
+  %s     Toggle done
+  %s     Delete (purge to trash)
+  %s     Edit metadata
+  %s     Notes
+  space  Select task (multi-select)
+  %s     Delete selected (with confirm)
+  %s     Delete all done (with confirm)
+
+Metadata Editor:
+  up/down or tab/shift+tab  Move fields
+  enter                    Save/next field
+  esc                      Save and close
+
+Recurrence:
+  Recurrence field supports:
+    every day
+    every 3 days
+    every 2 weeks
+    every 2 weeks on Mon
+    every month
+    every month on Fri
+    daily | weekly | monthly (aliases)
+  Weekdays: Mon/Tue/Wed/Thu/Fri/Sat/Sun (short or long)
+  Interval alone means "every N days"
+
+Calendar:
+  h/l day • j/k week • H/L month
+  enter day detail • esc/q close
+
+`, m.cfg.Keys.Up, m.cfg.Keys.Down, m.cfg.Keys.Rename, m.cfg.Keys.Search, m.cfg.Keys.Quit, m.cfg.Keys.Add, m.cfg.Keys.Toggle, m.cfg.Keys.Delete, m.cfg.Keys.Edit, m.cfg.Keys.NoteView, m.cfg.Keys.Delete, m.cfg.Keys.DeleteAllDone), "\n")
+}
+
+func (m Model) helpMaxScroll() int {
+	if m.height <= 0 {
+		return 0
+	}
+	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Help") + "\n\n"
+	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
+	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
+	if bodyMax <= 0 {
+		return 0
+	}
+	lines := strings.Split(strings.TrimRight(m.helpContent(), "\n"), "\n")
+	if len(lines) <= bodyMax {
+		return 0
+	}
+	return len(lines) - bodyMax
+}
+
+func (m Model) renderHelpBody(maxLines int) string {
+	lines := strings.Split(strings.TrimRight(m.helpContent(), "\n"), "\n")
+	if maxLines <= 0 || len(lines) == 0 {
+		return ""
+	}
+	maxScroll := len(lines) - maxLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := clampInt(m.helpScroll, 0, maxScroll)
 	end := scroll + maxLines
 	if end > len(lines) {
 		end = len(lines)
@@ -2726,7 +2864,7 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		cmdLower := strings.ToLower(cmd)
 		switch cmdLower {
 		case "help":
-			m.status = "Commands: help | agenda | calendar | sort (s then d/p/t/a/s) | rename (r) | priority +/- | due ]/[ | notes (enter view, e edit)"
+			return m.enterHelpView()
 		case "agenda":
 			return m.enterReportView()
 		case "calendar":
@@ -2746,7 +2884,7 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 
 func completeCommand(input string) string {
 	cmd := strings.ToLower(strings.TrimSpace(input))
-	commands := []string{"agenda", "calendar"}
+	commands := []string{"agenda", "calendar", "help"}
 	if cmd == "" {
 		return commands[0]
 	}
@@ -2799,6 +2937,7 @@ func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 func (m Model) startRename(t storage.Task) (tea.Model, tea.Cmd) {
 	m.renameID = t.ID
 	m.input.SetValue(t.Title)
+	m.input.CursorEnd()
 	m.input.Placeholder = "Rename task"
 	m.input.Focus()
 	m.mode = modeRename
@@ -2811,6 +2950,7 @@ func (m Model) startRenameTopic(name string) (tea.Model, tea.Cmd) {
 	m.renameTopic = name
 	m.renameIsTopic = true
 	m.input.SetValue(name)
+	m.input.CursorEnd()
 	m.input.Placeholder = "Rename topic"
 	m.input.Focus()
 	m.mode = modeRename
