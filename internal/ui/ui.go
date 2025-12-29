@@ -2016,8 +2016,13 @@ func (m Model) renderNoteView() string {
 	}
 	var b strings.Builder
 	headerLines := []string{
-		m.styles.Heading.Render("Notes: ") + m.styles.Accent.Render(m.note.target.label()),
+		m.styles.Accent.Render(m.note.target.label()),
 		"",
+	}
+	metaLines := m.noteMetaBlockLines()
+	if len(metaLines) > 0 {
+		headerLines = append(headerLines, metaLines...)
+		headerLines = append(headerLines, m.noteMetaSeparator(), "")
 	}
 	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit, %s to purge",
 		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit, m.cfg.Keys.Delete))
@@ -2975,11 +2980,86 @@ func (m Model) noteBodyLines() []string {
 	return strings.Split(rendered, "\n")
 }
 
+func (m Model) noteMetaBlockLines() []string {
+	if m.note == nil {
+		return nil
+	}
+	type row struct {
+		label string
+		value string
+	}
+	rows := []row{}
+	switch m.note.target.kind {
+	case noteTask:
+		idx := m.findTaskIndex(m.note.target.taskID)
+		if idx < 0 {
+			return nil
+		}
+		task := m.tasks[idx]
+		recurrence := "off"
+		if recSummary := recurrenceSummary(task); recSummary != "" {
+			if next, ok := nextRecurrenceDate(task); ok {
+				recurrence = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
+			} else {
+				recurrence = recSummary
+			}
+		}
+		rows = []row{
+			{label: "Topics", value: emptyPlaceholder(strings.Join(task.Topics, ", "))},
+			{label: "Tags", value: emptyPlaceholder(task.Tags)},
+			{label: "Priority", value: fmt.Sprintf("%d", task.Priority)},
+			{label: "Due", value: emptyPlaceholder(formatDateTime(task.Due))},
+			{label: "Start", value: emptyPlaceholder(formatDate(task.Start))},
+			{label: "Timezone", value: emptyPlaceholder(defaultTimezone(task.Timezone))},
+			{label: "Recurrence", value: recurrence},
+		}
+	case noteTopic:
+		stats := m.topicStats()[m.note.target.topic]
+		rows = []row{
+			{label: "Topic", value: m.note.target.topic},
+			{label: "Tasks", value: fmt.Sprintf("%d", stats.total)},
+			{label: "Overdue", value: fmt.Sprintf("%d", stats.overdue)},
+		}
+	default:
+		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	labelWidth := 0
+	for _, r := range rows {
+		if len(r.label) > labelWidth {
+			labelWidth = len(r.label)
+		}
+	}
+	lines := make([]string, 0, len(rows))
+	for _, r := range rows {
+		label := fmt.Sprintf("%-*s", labelWidth, r.label)
+		lines = append(lines, fmt.Sprintf("%s : %s", label, r.value))
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
+}
+
+func (m Model) noteMetaSeparator() string {
+	width := m.width
+	if width <= 0 {
+		width = 24
+	}
+	return m.styles.Border.Render(m.ruleLine(width))
+}
+
 func (m Model) noteAvailableHeight() int {
 	if m.height <= 0 {
 		return -1
 	}
-	headerLines := 2
+	metaLines := m.noteMetaBlockLines()
+	headerLines := 2 + len(metaLines)
+	if len(metaLines) > 0 {
+		headerLines += 2
+	}
 	footerLines := 1
 	blankBeforeFooter := 1
 	usable := m.height - 1 - headerLines - footerLines - blankBeforeFooter
@@ -3160,6 +3240,43 @@ func (m Model) renderCodeBlock(lines []string) string {
 		}
 		b.WriteString(m.styles.Border.Render("│ "))
 		b.WriteString(m.styles.Muted.Render(text))
+		b.WriteString(strings.Repeat(" ", padding))
+		b.WriteString(m.styles.Border.Render(" │"))
+		b.WriteString("\n")
+	}
+	b.WriteString(m.styles.Border.Render("└" + horiz + "┘"))
+	return b.String()
+}
+
+func (m Model) renderInfoBlock(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	maxLen := 0
+	for _, line := range lines {
+		if len(line) > maxLen {
+			maxLen = len(line)
+		}
+	}
+	contentWidth := maxLen
+	if m.width > 0 {
+		limit := m.width - 4
+		if limit > 0 && contentWidth > limit {
+			contentWidth = limit
+		}
+	}
+	horiz := strings.Repeat("─", contentWidth+2)
+	var b strings.Builder
+	b.WriteString(m.styles.Border.Render("┌" + horiz + "┐"))
+	b.WriteString("\n")
+	for _, line := range lines {
+		text := truncateText(line, contentWidth)
+		padding := contentWidth - len(text)
+		if padding < 0 {
+			padding = 0
+		}
+		b.WriteString(m.styles.Border.Render("│ "))
+		b.WriteString(text)
 		b.WriteString(strings.Repeat(" ", padding))
 		b.WriteString(m.styles.Border.Render(" │"))
 		b.WriteString("\n")
