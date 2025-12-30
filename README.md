@@ -39,7 +39,7 @@ Examples:
 Notes:
 - Weekday names accept short and long forms: `Mon`/`Monday`, `Tue`/`Tuesday`, etc.
 - If `Recurrence` is empty but `Interval` is set, it is treated as `every N days`.
-- The UI shows a “Next: YYYY-MM-DD” preview for recurring tasks.
+- The UI shows a "Next: YYYY-MM-DD" preview for recurring tasks.
 
 ## Theme
 
@@ -77,12 +77,12 @@ Options:
 **Recurrence needs some NLP feature to parse and calculate next due date**
 
 - Clearer input model: Allow every X days/weeks/months + optional weekday selector (e.g., every 2 weeks on Mon), while keeping a raw rule fallback.
-- Next occurrence preview: Show “Next: YYYY‑MM‑DD” in metadata and in the recurring list so users trust the schedule.
+- Next occurrence preview: Show "Next: YYYY‑MM‑DD" in metadata and in the recurring list so users trust the schedule.
 - Skip/shift controls: Add ]/[ to shift next occurrence and a s key to skip just one cycle.
 - Completion behavior toggle: Choose whether completing a recurring task creates a new instance or just updates the due date in place.
-- End conditions: Support “until date” or “after N occurrences.”
+- End conditions: Support "until date" or "after N occurrences."
 - Exception dates: Let users add one‑off skip dates (holidays, vacations).
-- Human‑readable labels: Store a normalized rule and a display label (e.g., weekly:mon,wed → “Weekly on Mon/Wed”).
+- Human‑readable labels: Store a normalized rule and a display label (e.g., weekly:mon,wed → "Weekly on Mon/Wed").
 
 ## DB and Task Sharing
 
@@ -125,3 +125,52 @@ I have polished your existing list for clarity and professional terminology, the
 
 * **Hook System:** Allow users to run scripts on certain events (e.g., `on_task_complete` triggers a script that updates a Slack status).
 * **Sync Backend:** Optional end-to-end encrypted sync between multiple machines using a simple central relay or Git-based syncing.
+
+
+# Jira 
+
+- Two-way sync modes: read-only (safe) vs. bidirectional (opt-in), with a clear "source of truth" toggle.
+- Task mapping: Jira Issue → Bada Task fields (summary, status, priority, due, labels, assignee).
+- Filters: sync by JQL (e.g., "assigned to me AND status != Done"), per-project toggles.
+- Status actions: mark Bada task done → transition Jira issue (configurable transition).
+- Comment/notes bridge: append Bada notes to Jira comments (or vice versa), with opt-in prefixes.
+- Offline queue: local actions stored and pushed when online; show "pending sync" badge.
+- Daily view: "Today" panel showing Jira due/overdue issues alongside local tasks.
+- Quick commands: :jira sync, :jira open ISSUE-123, :jira assign me.
+- Rate-limit and batching: avoid API spamming; show last sync time and errors.
+- Auth: API token + base URL stored in config; support per-user profiles.
+
+
+## RoadMap
+
+Here's a productivity‑first roadmap for Bada that stays personal, fast, and calm:
+
+Phase 1: Capture & Clarity
+- Quick capture everywhere: global "inbox" + minimal friction add flow
+- Better defaults: smarter default filter, recent tasks, quick tags
+- Lightweight notes: faster note edit/preview, auto‑save
+
+Phase 2: Focus & Flow
+
+- Focus mode: single task focus with minimal UI
+- Time‑blocking hints: "today" section, due/overdue clarity
+- Gentle reminders: daily review screen and "next 3 days" digest
+
+Phase 3: Review & Reflection
+
+- Weekly review view: stale tasks, overdue, and "someday"
+- Simple stats: completed today/this week, streaks (optional)
+- Archive hygiene: bulk cleanup and restore improvements
+
+Phase 4: Organization
+
+- Topics/tags hygiene: rename/merge tooling, quick re-tagging
+- Saved searches: "contexts" like @home, @deepwork
+- Priority & energy pairing: low/medium/high effort tagging
+
+Phase 5: Quality of Life
+
+- Undo history for destructive actions
+- Export/import backups (CSV/JSON)
+- Theming polish + keyboard ergonomics refinements
+- If you want, I can turn this into a GitHub milestones list with issue titles and acceptance criteria.

@@ -152,7 +152,7 @@ type Model struct {
 	pendingDBPath  string
 }
 
-func Run(store *storage.Store, cfg config.Config, configPath string) error {
+func Run(store *storage.Store, cfg config.Config, configPath string, firstLaunch bool) error {
 	tasks, err := store.FetchTasks()
 	if err != nil {
 		return err
@@ -183,6 +183,9 @@ func Run(store *storage.Store, cfg config.Config, configPath string) error {
 	}
 	m.sortTasks()
 	m.refreshReport()
+	if firstLaunch {
+		m, _ = m.startConfig()
+	}
 
 	program := tea.NewProgram(m)
 	_, err = program.Run()
@@ -3422,7 +3425,7 @@ func (m Model) startCommand() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) startConfig() (tea.Model, tea.Cmd) {
+func (m Model) startConfig() (Model, tea.Cmd) {
 	m.mode = modeConfig
 	m.configStage = configStagePath
 	m.pendingCfgPath = ""

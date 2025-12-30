@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,6 +12,10 @@ import (
 
 func main() {
 	configPath := config.ResolveConfigPath()
+	firstLaunch := false
+	if _, err := os.Stat(configPath); err != nil {
+		firstLaunch = errors.Is(err, os.ErrNotExist)
+	}
 	cfg, err := config.LoadOrCreate(configPath)
 	if err != nil {
 		fmt.Printf("failed to load config: %v\n", err)
@@ -24,7 +29,7 @@ func main() {
 	}
 	defer store.Close()
 
-	if err := ui.Run(store, cfg, configPath); err != nil {
+	if err := ui.Run(store, cfg, configPath, firstLaunch); err != nil {
 		fmt.Printf("error running program: %v\n", err)
 		os.Exit(1)
 	}
