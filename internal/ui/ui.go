@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"bada/internal/config"
 	"bada/internal/storage"
@@ -1173,14 +1174,10 @@ func (m Model) renderCalendarView() string {
 
 func (m Model) renderCalendarMonth() string {
 	var b strings.Builder
-	b.WriteString(m.renderListBanner())
-	b.WriteString("\n\n")
 	monthTitle := m.calendarMonth.Format("January 2006")
 	b.WriteString(m.styles.Accent.Render("Calendar • " + monthTitle))
 	b.WriteString("\n\n")
 	b.WriteString(m.renderCalendarGrid())
-	b.WriteString("\n\n")
-	b.WriteString(m.renderCalendarInfo())
 	b.WriteString("\n")
 	b.WriteString(m.styles.Muted.Render("h/l day • j/k week • H/L month • enter day • esc/q close"))
 	return b.String()
@@ -1188,8 +1185,6 @@ func (m Model) renderCalendarMonth() string {
 
 func (m Model) renderCalendarDetail() string {
 	var b strings.Builder
-	b.WriteString(m.renderListBanner())
-	b.WriteString("\n\n")
 	title := fmt.Sprintf("Calendar • %s", m.calendarDay.Format("Mon, Jan 2, 2006"))
 	b.WriteString(m.styles.Accent.Render(title))
 	b.WriteString("\n\n")
@@ -1201,42 +1196,99 @@ func (m Model) renderCalendarDetail() string {
 
 func (m Model) renderCalendarGrid() string {
 	weeks := calendarWeeks(m.calendarMonth)
+	weeks = filterMonthWeeks(weeks, m.calendarMonth)
+	if len(weeks) > 5 {
+		selectedWeek := weekIndexForDay(weeks, m.calendarDay)
+		start := clampInt(selectedWeek-2, 0, len(weeks)-5)
+		weeks = weeks[start : start+5]
+	}
+	monthStart := time.Date(m.calendarMonth.Year(), m.calendarMonth.Month(), 1, 0, 0, 0, 0, m.calendarMonth.Location())
+	nextMonthStart := monthStart.AddDate(0, 1, 0)
 	cellWidth := 12
+	if m.width > 0 {
+		cellWidth = clampInt(m.width/7, 10, 20)
+	}
+	cellHeight := 4
+	maxTasks := 2
 	dayNames := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 	var b strings.Builder
 	for _, name := range dayNames {
-		b.WriteString(padRight(name, cellWidth))
+		b.WriteString(padRightWidth(name, cellWidth))
 	}
 	b.WriteString("\n")
-	for _, week := range weeks {
+	for weekIndex, week := range weeks {
+		weekCells := make([][]string, 0, len(week))
 		for _, day := range week {
-			b.WriteString(m.renderCalendarCell(day, cellWidth))
+			showOverflow := weekIndex == len(weeks)-1
+			weekCells = append(weekCells, m.renderCalendarCellLines(day, cellWidth, cellHeight, maxTasks, monthStart, nextMonthStart, showOverflow))
 		}
-		b.WriteString("\n")
+		for line := 0; line < cellHeight; line++ {
+			for _, cell := range weekCells {
+				b.WriteString(cell[line])
+			}
+			b.WriteString("\n")
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m Model) renderCalendarCell(day time.Time, width int) string {
+func (m Model) renderCalendarCellLines(day time.Time, width, height, maxTasks int, monthStart, nextMonthStart time.Time, showOverflow bool) []string {
+	lines := make([]string, 0, height)
 	inMonth := day.Month() == m.calendarMonth.Month()
-	count := m.tasksForDayCount(day)
-	prefix := " "
-	if count > 0 {
-		prefix = "*"
+	if !inMonth {
+		if !showOverflow || day.Before(nextMonthStart) {
+			for i := 0; i < height; i++ {
+				lines = append(lines, m.styles.Muted.Render(padRightWidth("", width)))
+			}
+			return lines
+		}
 	}
-	label := fmt.Sprintf("%s%2d", prefix, day.Day())
-	label = padRight(label, width)
-	style := m.styles.Muted
+	tasks := m.tasksForDay(day)
+	headerStyle := m.styles.Muted
+	taskStyle := m.styles.Muted
 	if inMonth {
-		style = m.styles.Border
+		headerStyle = m.styles.Border
+		taskStyle = lipgloss.NewStyle()
 	}
 	if isSameDate(day, time.Now()) {
-		style = m.styles.Warning
+		headerStyle = m.styles.Warning
+		taskStyle = m.styles.Warning
 	}
 	if isSameDate(day, m.calendarDay) {
-		style = m.styles.Selection
+		headerStyle = m.styles.Selection
+		taskStyle = m.styles.Selection
 	}
-	return style.Render(label)
+
+	dateLabel := fmt.Sprintf("%2d", day.Day())
+	if len(tasks) > 0 {
+		dateLabel = fmt.Sprintf("%2d (%d)", day.Day(), len(tasks))
+	}
+	dateLabel = padRightWidth(truncateTextWidth(dateLabel, width), width)
+	lines = append(lines, headerStyle.Render(dateLabel))
+
+	showCount := len(tasks)
+	if showCount > maxTasks {
+		showCount = maxTasks
+	}
+	for i := 0; i < showCount; i++ {
+		text := "• " + truncateTextWidth(tasks[i].Title, width-2)
+		lines = append(lines, taskStyle.Render(padRightWidth(text, width)))
+	}
+
+	if len(tasks) > maxTasks {
+		overflow := fmt.Sprintf("+%d more", len(tasks)-maxTasks)
+		overflow = padRightWidth(truncateTextWidth(overflow, width), width)
+		overflowStyle := taskStyle
+		if inMonth && !isSameDate(day, time.Now()) && !isSameDate(day, m.calendarDay) {
+			overflowStyle = m.styles.Muted
+		}
+		lines = append(lines, overflowStyle.Render(overflow))
+	}
+
+	for len(lines) < height {
+		lines = append(lines, taskStyle.Render(padRightWidth("", width)))
+	}
+	return lines
 }
 
 func (m Model) renderCalendarDayList() string {
@@ -1278,10 +1330,6 @@ func (m Model) renderCalendarInfo() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m Model) tasksForDayCount(day time.Time) int {
-	return len(m.tasksForDay(day))
-}
-
 func (m Model) tasksForDay(day time.Time) []storage.Task {
 	dayKey := dateKey(day, m.calendarDay.Location())
 	var list []storage.Task
@@ -1316,11 +1364,65 @@ func calendarWeeks(month time.Time) [][]time.Time {
 	return weeks
 }
 
+func filterMonthWeeks(weeks [][]time.Time, month time.Time) [][]time.Time {
+	filtered := make([][]time.Time, 0, len(weeks))
+	for _, week := range weeks {
+		if weekHasMonthDay(week, month) {
+			filtered = append(filtered, week)
+		}
+	}
+	return filtered
+}
+
+func weekHasMonthDay(week []time.Time, month time.Time) bool {
+	for _, day := range week {
+		if day.Month() == month.Month() && day.Year() == month.Year() {
+			return true
+		}
+	}
+	return false
+}
+
+func weekIndexForDay(weeks [][]time.Time, day time.Time) int {
+	for i, week := range weeks {
+		for _, d := range week {
+			if isSameDate(d, day) {
+				return i
+			}
+		}
+	}
+	if len(weeks) == 0 {
+		return 0
+	}
+	return 0
+}
+
 func padRight(text string, width int) string {
 	if len(text) >= width {
 		return text
 	}
 	return text + strings.Repeat(" ", width-len(text))
+}
+
+func padRightWidth(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	textWidth := lipgloss.Width(text)
+	if textWidth >= width {
+		return text
+	}
+	return text + strings.Repeat(" ", width-textWidth)
+}
+
+func truncateTextWidth(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	return runewidth.Truncate(text, width, "…")
 }
 
 func isSameDate(a, b time.Time) bool {
