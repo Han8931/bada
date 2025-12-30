@@ -3,12 +3,15 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
 
 const (
 	DefaultConfigFileName = "config.toml"
+	DefaultConfigPathFile = "config.path"
 	DefaultDBName         = "bada.db"
 	DefaultTrashDir       = "trash"
 )
@@ -65,6 +68,9 @@ type Config struct {
 
 func LoadOrCreate(path string) (Config, error) {
 	cfg := defaultConfig()
+	if strings.TrimSpace(path) == "" {
+		return cfg, errors.New("config path is empty")
+	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		if err := write(path, cfg); err != nil {
 			return cfg, err
@@ -81,10 +87,10 @@ func LoadOrCreate(path string) (Config, error) {
 	}
 	applyKeyDefaults(&cfg)
 	if cfg.DBPath == "" {
-		cfg.DBPath = DefaultDBName
+		cfg.DBPath = DefaultDBPath()
 	}
 	if cfg.TrashDir == "" {
-		cfg.TrashDir = DefaultTrashDir
+		cfg.TrashDir = DefaultTrashPath()
 	}
 	return cfg, nil
 }
@@ -160,6 +166,9 @@ func applyKeyDefaults(cfg *Config) {
 }
 
 func write(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	data, err := toml.Marshal(cfg)
 	if err != nil {
 		return err
@@ -169,9 +178,9 @@ func write(path string, cfg Config) error {
 
 func defaultConfig() Config {
 	return Config{
-		DBPath:        DefaultDBName,
+		DBPath:        DefaultDBPath(),
 		DefaultFilter: "all",
-		TrashDir:      DefaultTrashDir,
+		TrashDir:      DefaultTrashPath(),
 		Keys: Keymap{
 			Quit:          "q",
 			Add:           "a",
@@ -212,4 +221,66 @@ func defaultConfig() Config {
 			StatusAltFg: "#0B0F14",
 		},
 	}
+}
+
+func Save(path string, cfg Config) error {
+	return write(path, cfg)
+}
+
+func DefaultConfigDir() string {
+	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
+		return filepath.Join(dir, "bada")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config", "bada")
+	}
+	return "bada"
+}
+
+func DefaultCacheDir() string {
+	if dir := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); dir != "" {
+		return filepath.Join(dir, "bada")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".cache", "bada")
+	}
+	return "bada-cache"
+}
+
+func DefaultConfigPath() string {
+	return filepath.Join(DefaultConfigDir(), DefaultConfigFileName)
+}
+
+func DefaultDBPath() string {
+	return filepath.Join(DefaultCacheDir(), DefaultDBName)
+}
+
+func DefaultTrashPath() string {
+	return filepath.Join(DefaultCacheDir(), DefaultTrashDir)
+}
+
+func ResolveConfigPath() string {
+	if env := strings.TrimSpace(os.Getenv("BADA_CONFIG")); env != "" {
+		return env
+	}
+	if data, err := os.ReadFile(ConfigPathFile()); err == nil {
+		if path := strings.TrimSpace(string(data)); path != "" {
+			return path
+		}
+	}
+	return DefaultConfigPath()
+}
+
+func ConfigPathFile() string {
+	return filepath.Join(DefaultConfigDir(), DefaultConfigPathFile)
+}
+
+func SetConfigPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("config path is empty")
+	}
+	if err := os.MkdirAll(DefaultConfigDir(), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(ConfigPathFile(), []byte(path+"\n"), 0o644)
 }

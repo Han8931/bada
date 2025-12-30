@@ -40,6 +40,23 @@ if [[ -z "${PREFIX}" ]]; then
   exit 1
 fi
 
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/bada"
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/bada"
+CONFIG_PATH="${CONFIG_DIR}/config.toml"
+DB_PATH="${CACHE_DIR}/bada.db"
+TRASH_DIR="${CACHE_DIR}/trash"
+
+mkdir -p "${CONFIG_DIR}" "${CACHE_DIR}"
+
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  tmpfile="$(mktemp)"
+  sed -e "s|^db_path = .*|db_path = \"${DB_PATH}\"|" \
+      -e "s|^trash_dir = .*|trash_dir = \"${TRASH_DIR}\"|" \
+      "${ROOT_DIR}/config.example.toml" > "${tmpfile}"
+  mv "${tmpfile}" "${CONFIG_PATH}"
+  echo "Wrote default config to ${CONFIG_PATH}"
+fi
+
 BIN_DIR="${PREFIX}/bin"
 TARGET="${BIN_DIR}/${BIN_NAME}"
 

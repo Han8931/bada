@@ -28,6 +28,7 @@ const (
 	modeMetadata
 	modeRename
 	modeCommand
+	modeConfig
 	modeSearch
 	modeTrash
 	modeNote
@@ -42,6 +43,13 @@ type noteKind int
 const (
 	noteTask noteKind = iota
 	noteTopic
+)
+
+type configStage int
+
+const (
+	configStagePath configStage = iota
+	configStageDB
 )
 
 type noteTarget struct {
@@ -95,6 +103,7 @@ type metaState struct {
 type Model struct {
 	store          *storage.Store
 	cfg            config.Config
+	configPath     string
 	tasks          []storage.Task
 	trash          []storage.TrashEntry
 	cursor         int
@@ -138,9 +147,12 @@ type Model struct {
 	calendarDetail bool
 	helpScroll     int
 	ganttScroll    int
+	configStage    configStage
+	pendingCfgPath string
+	pendingDBPath  string
 }
 
-func Run(store *storage.Store, cfg config.Config) error {
+func Run(store *storage.Store, cfg config.Config, configPath string) error {
 	tasks, err := store.FetchTasks()
 	if err != nil {
 		return err
@@ -155,6 +167,7 @@ func Run(store *storage.Store, cfg config.Config) error {
 	m := Model{
 		store:         store,
 		cfg:           cfg,
+		configPath:    configPath,
 		tasks:         tasks,
 		cursor:        clampCursor(0, len(tasks)),
 		trashSelected: map[int]bool{},
@@ -214,6 +227,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeCommand {
 			return m.updateCommandMode(msg.String(), msg)
+		}
+		if m.mode == modeConfig {
+			return m.updateConfigMode(msg.String(), msg)
 		}
 		if m.mode == modeSearch {
 			return m.updateSearchMode(msg.String(), msg)
@@ -589,6 +605,14 @@ func (m Model) renderFooterPanel() string {
 		return b.String()
 	case modeCommand:
 		b.WriteString(m.styles.Heading.Render(":"))
+		b.WriteString(m.input.View())
+		return b.String()
+	case modeConfig:
+		if m.configStage == configStageDB {
+			b.WriteString(m.styles.Heading.Render("DB path: "))
+		} else {
+			b.WriteString(m.styles.Heading.Render("Config path: "))
+		}
 		b.WriteString(m.input.View())
 		return b.String()
 	case modeSearch:
@@ -1389,6 +1413,7 @@ func (m Model) helpContent() string {
 	return strings.TrimRight(fmt.Sprintf(`Commands:
   :agenda    Open reminder report
   :calendar  Open calendar view
+  :config    Update config and db paths
   :help      Open this help screen
 
 List Navigation:
@@ -3373,6 +3398,8 @@ func (m Model) modeLabel() string {
 		return "RENAME"
 	case modeCommand:
 		return "COMMAND"
+	case modeConfig:
+		return "CONFIG"
 	case modeSearch:
 		return "SEARCH"
 	case modeTrash:
@@ -3392,6 +3419,19 @@ func (m Model) startCommand() (tea.Model, tea.Cmd) {
 	m.input.Placeholder = ""
 	m.input.Focus()
 	m.status = "Command: type a command (tab to autocomplete), Enter to run, Esc to cancel"
+	return m, nil
+}
+
+func (m Model) startConfig() (tea.Model, tea.Cmd) {
+	m.mode = modeConfig
+	m.configStage = configStagePath
+	m.pendingCfgPath = ""
+	m.pendingDBPath = ""
+	m.input.SetValue(m.configPath)
+	m.input.Placeholder = "Config path"
+	m.input.Focus()
+	m.input.CursorEnd()
+	m.status = "Config path: Enter to continue, Esc to cancel"
 	return m, nil
 }
 
@@ -3417,7 +3457,7 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		return m, nil
 	case m.cfg.Keys.Confirm, "enter":
 		cmd := strings.TrimSpace(m.input.Value())
-		cmdLower := strings.ToLower(cmd)
+		cmdLower := strings.TrimPrefix(strings.ToLower(cmd), ":")
 		switch cmdLower {
 		case "help":
 			return m.enterHelpView()
@@ -3427,6 +3467,8 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			return m.enterCalendarView()
 		case "gantt":
 			return m.enterGanttView()
+		case "config":
+			return m.startConfig()
 		default:
 			m.status = fmt.Sprintf("unknown command: %s", cmd)
 		}
@@ -3441,16 +3483,22 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 }
 
 func completeCommand(input string) string {
-	cmd := strings.ToLower(strings.TrimSpace(input))
-	commands := []string{"agenda", "calendar", "gantt", "help"}
+	raw := strings.TrimSpace(input)
+	prefix := ""
+	if strings.HasPrefix(raw, ":") {
+		prefix = ":"
+		raw = strings.TrimPrefix(raw, ":")
+	}
+	cmd := strings.ToLower(raw)
+	commands := []string{"agenda", "calendar", "config", "gantt", "help"}
 	if cmd == "" {
-		return commands[0]
+		return prefix + commands[0]
 	}
 	if cmd == commands[0] {
-		return commands[1]
+		return prefix + commands[1]
 	}
 	if cmd == commands[1] {
-		return commands[0]
+		return prefix + commands[0]
 	}
 	var matches []string
 	for _, c := range commands {
@@ -3459,12 +3507,45 @@ func completeCommand(input string) string {
 		}
 	}
 	if len(matches) == 1 {
-		return matches[0]
+		return prefix + matches[0]
 	}
 	if len(matches) > 1 {
-		return matches[0]
+		return prefix + matches[0]
 	}
 	return input
+}
+
+func (m Model) updateConfigMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case m.cfg.Keys.Cancel, "esc":
+		m.mode = modeList
+		m.input.Blur()
+		m.status = "Config cancelled"
+		return m, nil
+	case m.cfg.Keys.Confirm, "enter":
+		value := strings.TrimSpace(m.input.Value())
+		if m.configStage == configStagePath {
+			if value == "" {
+				value = m.configPath
+			}
+			m.pendingCfgPath = value
+			m.configStage = configStageDB
+			m.input.SetValue(m.cfg.DBPath)
+			m.input.Placeholder = "DB path"
+			m.input.CursorEnd()
+			m.status = "DB path: Enter to save, Esc to cancel"
+			return m, nil
+		}
+		if value == "" {
+			value = m.cfg.DBPath
+		}
+		m.pendingDBPath = value
+		return m.applyConfigChanges()
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
 }
 
 func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -3490,6 +3571,84 @@ func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
 	}
+}
+
+func (m Model) applyConfigChanges() (tea.Model, tea.Cmd) {
+	newConfigPath := strings.TrimSpace(m.pendingCfgPath)
+	if newConfigPath == "" {
+		newConfigPath = m.configPath
+	}
+	newDBPath := strings.TrimSpace(m.pendingDBPath)
+	if newDBPath == "" {
+		newDBPath = m.cfg.DBPath
+	}
+
+	oldConfigPath := m.configPath
+	oldDBPath := m.cfg.DBPath
+
+	cfg := m.cfg
+	cfg.DBPath = newDBPath
+
+	var newStore *storage.Store
+	if newDBPath != oldDBPath {
+		store, err := storage.Open(newDBPath, cfg.TrashDir)
+		if err != nil {
+			m.mode = modeList
+			m.input.Blur()
+			m.status = fmt.Sprintf("db reopen failed: %v", err)
+			return m, nil
+		}
+		newStore = store
+	}
+
+	if err := config.Save(newConfigPath, cfg); err != nil {
+		if newStore != nil {
+			_ = newStore.Close()
+		}
+		m.mode = modeList
+		m.input.Blur()
+		m.status = fmt.Sprintf("config save failed: %v", err)
+		return m, nil
+	}
+
+	if newConfigPath != oldConfigPath {
+		if err := config.SetConfigPath(newConfigPath); err != nil {
+			if newStore != nil {
+				_ = newStore.Close()
+			}
+			m.mode = modeList
+			m.input.Blur()
+			m.status = fmt.Sprintf("config path update failed: %v", err)
+			return m, nil
+		}
+		m.configPath = newConfigPath
+	}
+
+	m.cfg = cfg
+	if newStore != nil {
+		_ = m.store.Close()
+		m.store = newStore
+		tasks, err := m.store.FetchTasks()
+		if err != nil {
+			m.mode = modeList
+			m.input.Blur()
+			m.status = fmt.Sprintf("reload failed: %v", err)
+			return m, nil
+		}
+		m.tasks = tasks
+		m.sortTasks()
+		m.refreshReport()
+		m.cursor = clampCursor(m.cursor, len(m.visibleItems()))
+	}
+
+	m.mode = modeList
+	m.input.Blur()
+	if newConfigPath != oldConfigPath || newDBPath != oldDBPath {
+		m.status = "Config updated"
+	} else {
+		m.status = "Config unchanged"
+	}
+	return m, nil
 }
 
 func (m Model) startRename(t storage.Task) (tea.Model, tea.Cmd) {

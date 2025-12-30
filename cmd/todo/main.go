@@ -10,7 +10,8 @@ import (
 )
 
 func main() {
-	cfg, err := config.LoadOrCreate(config.DefaultConfigFileName)
+	configPath := config.ResolveConfigPath()
+	cfg, err := config.LoadOrCreate(configPath)
 	if err != nil {
 		fmt.Printf("failed to load config: %v\n", err)
 		os.Exit(1)
@@ -23,7 +24,7 @@ func main() {
 	}
 	defer store.Close()
 
-	if err := ui.Run(store, cfg); err != nil {
+	if err := ui.Run(store, cfg, configPath); err != nil {
 		fmt.Printf("error running program: %v\n", err)
 		os.Exit(1)
 	}
