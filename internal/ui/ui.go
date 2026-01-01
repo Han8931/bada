@@ -2380,10 +2380,14 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startMetadataAdd() (tea.Model, tea.Cmd) {
+	defaultTopic := ""
+	if m.currentTopic != "" && !isSpecialTopic(m.currentTopic) {
+		defaultTopic = m.currentTopic
+	}
 	m.meta = &metaState{
 		taskID:    0,
 		title:     "",
-		topic:     "",
+		topic:     defaultTopic,
 		tags:      "",
 		priority:  "",
 		due:       "",
