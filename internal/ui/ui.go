@@ -87,18 +87,21 @@ type uiStyles struct {
 }
 
 type metaState struct {
-	taskID    int
-	title     string
-	topic     string
-	tags      string
-	priority  string
-	due       string
-	start     string
-	timezone  string
-	rule      string
-	interval  string
-	recurring bool
-	index     int
+	taskID        int
+	title         string
+	topic         string
+	tags          string
+	priority      string
+	due           string
+	start         string
+	timezone      string
+	rule          string
+	interval      string
+	recurring     bool
+	index         int
+	completions   []string
+	completionIdx int
+	lastInput     string
 }
 
 type Model struct {
@@ -2425,23 +2428,80 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		m.input.Blur()
 		m.status = "Metadata saved"
 		return m, nil
-	case "tab", "down":
+	case "tab":
+		if m.meta == nil {
+			return m, nil
+		}
+		currentInput := m.input.Value()
+		// Check if input changed since last tab - reset completions
+		if currentInput != m.meta.lastInput {
+			m.meta.completions = m.metaCompletions(m.meta.index, currentInput)
+			m.meta.completionIdx = 0
+			m.meta.lastInput = currentInput
+		}
+		if len(m.meta.completions) == 0 {
+			m.status = "No completions available"
+			return m, nil
+		}
+		// Apply current completion
+		completion := m.meta.completions[m.meta.completionIdx]
+		m.input.SetValue(completion)
+		m.input.CursorEnd()
+		m.meta.lastInput = completion
+		// Cycle to next completion for next tab press
+		m.meta.completionIdx = (m.meta.completionIdx + 1) % len(m.meta.completions)
+		m.status = fmt.Sprintf("Completion %d/%d: %s", m.meta.completionIdx, len(m.meta.completions), completion)
+		return m, nil
+	case "shift+tab":
+		if m.meta == nil {
+			return m, nil
+		}
+		currentInput := m.input.Value()
+		// Check if input changed since last tab - reset completions
+		if currentInput != m.meta.lastInput {
+			m.meta.completions = m.metaCompletions(m.meta.index, currentInput)
+			m.meta.completionIdx = len(m.meta.completions) - 1
+			m.meta.lastInput = currentInput
+		}
+		if len(m.meta.completions) == 0 {
+			m.status = "No completions available"
+			return m, nil
+		}
+		// Cycle to previous completion
+		m.meta.completionIdx--
+		if m.meta.completionIdx < 0 {
+			m.meta.completionIdx = len(m.meta.completions) - 1
+		}
+		// Apply current completion
+		completion := m.meta.completions[m.meta.completionIdx]
+		m.input.SetValue(completion)
+		m.input.CursorEnd()
+		m.meta.lastInput = completion
+		m.status = fmt.Sprintf("Completion %d/%d: %s", m.meta.completionIdx+1, len(m.meta.completions), completion)
+		return m, nil
+	case "down":
 		if m.meta == nil {
 			return m, nil
 		}
 		m.meta.setCurrentValue(m.input.Value())
 		m.meta.index = wrapIndex(m.meta.index+1, len(metaFields()))
+		m.meta.completions = nil
+		m.meta.completionIdx = 0
+		m.meta.lastInput = ""
 		m.input.SetValue(m.meta.currentValue())
 		m.input.CursorEnd()
 		m.input.Placeholder = m.meta.currentLabel()
 		m.status = m.metaPrompt()
 		return m, nil
-	case "shift+tab", "up":
+	case "up":
 		if m.meta == nil {
 			return m, nil
 		}
 		m.meta.setCurrentValue(m.input.Value())
 		m.meta.index = wrapIndex(m.meta.index-1, len(metaFields()))
+		m.meta.completions = nil
+		m.meta.completionIdx = 0
+		m.meta.lastInput = ""
 		m.input.SetValue(m.meta.currentValue())
 		m.input.CursorEnd()
 		m.input.Placeholder = m.meta.currentLabel()
@@ -2454,6 +2514,9 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 		m.meta.setCurrentValue(m.input.Value())
 		if m.meta.taskID == 0 && m.meta.index < len(metaFields())-1 {
 			m.meta.index++
+			m.meta.completions = nil
+			m.meta.completionIdx = 0
+			m.meta.lastInput = ""
 			m.input.SetValue(m.meta.currentValue())
 			m.input.CursorEnd()
 			m.input.Placeholder = m.meta.currentLabel()
@@ -2474,6 +2537,9 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 		m.meta.index++
+		m.meta.completions = nil
+		m.meta.completionIdx = 0
+		m.meta.lastInput = ""
 		m.input.SetValue(m.meta.currentValue())
 		m.input.CursorEnd()
 		m.input.Placeholder = m.meta.currentLabel()
@@ -4810,6 +4876,73 @@ func (m Model) sortedTopics() []string {
 	}
 	sort.Strings(topics)
 	return topics
+}
+
+func (m Model) sortedTags() []string {
+	set := map[string]struct{}{}
+	for _, t := range m.tasks {
+		for _, tag := range strings.Split(t.Tags, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				set[tag] = struct{}{}
+			}
+		}
+	}
+	tags := make([]string, 0, len(set))
+	for k := range set {
+		tags = append(tags, k)
+	}
+	sort.Strings(tags)
+	return tags
+}
+
+func commonTimezones() []string {
+	return []string{
+		"UTC+00:00", "UTC+01:00", "UTC+02:00", "UTC+03:00", "UTC+04:00",
+		"UTC+05:00", "UTC+05:30", "UTC+06:00", "UTC+07:00", "UTC+08:00",
+		"UTC+09:00", "UTC+10:00", "UTC+11:00", "UTC+12:00",
+		"UTC-01:00", "UTC-02:00", "UTC-03:00", "UTC-04:00", "UTC-05:00",
+		"UTC-06:00", "UTC-07:00", "UTC-08:00", "UTC-09:00", "UTC-10:00",
+		"UTC-11:00", "UTC-12:00",
+	}
+}
+
+func commonRecurrenceRules() []string {
+	return []string{
+		"daily", "weekly", "monthly", "yearly",
+		"every 2 days", "every 3 days", "every 7 days",
+		"every 2 weeks", "every month", "every year",
+		"weekdays", "weekends",
+	}
+}
+
+func (m Model) metaCompletions(fieldIndex int, prefix string) []string {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	var candidates []string
+	switch fieldIndex {
+	case 1: // Topics
+		candidates = m.sortedTopics()
+	case 2: // Tags
+		candidates = m.sortedTags()
+	case 6: // Timezone
+		candidates = commonTimezones()
+	case 7: // Rule
+		candidates = commonRecurrenceRules()
+	default:
+		return nil
+	}
+
+	if prefix == "" {
+		return candidates
+	}
+
+	var matches []string
+	for _, c := range candidates {
+		if strings.HasPrefix(strings.ToLower(c), prefix) {
+			matches = append(matches, c)
+		}
+	}
+	return matches
 }
 
 func isSpecialTopic(topic string) bool {
