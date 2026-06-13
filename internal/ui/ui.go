@@ -72,18 +72,23 @@ type noteEditedMsg struct {
 }
 
 type uiStyles struct {
-	Title     lipgloss.Style
-	Heading   lipgloss.Style
-	Accent    lipgloss.Style
-	Muted     lipgloss.Style
-	Border    lipgloss.Style
-	Selection lipgloss.Style
-	Done      lipgloss.Style
-	Danger    lipgloss.Style
-	Warning   lipgloss.Style
-	Success   lipgloss.Style
-	Status    lipgloss.Style
-	StatusAlt lipgloss.Style
+	Title       lipgloss.Style
+	Heading     lipgloss.Style
+	Accent      lipgloss.Style
+	Muted       lipgloss.Style
+	Border      lipgloss.Style
+	Selection   lipgloss.Style
+	Done        lipgloss.Style
+	Danger      lipgloss.Style
+	Warning     lipgloss.Style
+	Success     lipgloss.Style
+	Status      lipgloss.Style
+	StatusAlt   lipgloss.Style
+	Panel       lipgloss.Style // rounded border for framed panels
+	PanelTitle  lipgloss.Style // title text shown in a panel's top border
+	TableHeader lipgloss.Style // colored column-header bar
+	KeyCap      lipgloss.Style // highlighted key glyph in hint bars
+	KeyLabel    lipgloss.Style // muted label following a KeyCap
 }
 
 type metaState struct {
@@ -556,32 +561,59 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
-	header := m.renderListBanner() + "\n"
-	gap := "\n"
-	divider := m.styles.Border.Render(m.ruleLine(m.taskListLineWidth())) + "\n"
-	footer := m.renderFooterPanel()
-	tail := ""
+	legend := m.legendBar()
+	footer := strings.TrimRight(m.renderFooterPanel(), "\n")
+	showHints := m.mode == modeList && m.meta == nil
+	hints := ""
+	if showHints {
+		hints = m.hintBar(m.listHints())
+	}
+
+	overhead := 2 + countLines(legend) + countLines(footer) // 2 = panel borders
+	if showHints {
+		overhead += countLines(hints)
+	}
 
 	listMax := 0
 	if m.height > 0 {
-		available := m.height - 1
-		listMax = available - countLines(header) - countLines(gap) - countLines(divider) - countLines(footer) - countLines(tail)
-		if listMax < 0 {
-			listMax = 0
+		listMax = (m.height - 1) - overhead
+		if listMax < 1 {
+			listMax = 1
 		}
 	}
 
-	b.WriteString(header)
+	var body string
 	if m.height > 0 {
-		b.WriteString(m.renderTaskListWithHeight(listMax))
+		body = m.renderTaskListWithHeight(listMax)
 	} else {
-		b.WriteString(m.renderTaskList())
+		body = m.renderTaskList()
 	}
-	b.WriteString(gap)
-	b.WriteString(divider)
+
+	b.WriteString(m.panel("bada · Tasks", body))
+	b.WriteString("\n")
+	b.WriteString(legend)
+	b.WriteString("\n")
 	b.WriteString(footer)
-	b.WriteString(tail)
+	if showHints {
+		b.WriteString("\n")
+		b.WriteString(hints)
+	}
 	return m.fillView(b.String())
+}
+
+// listHints returns the key-hint chips shown beneath the task list.
+func (m Model) listHints() []keyHint {
+	k := m.cfg.Keys
+	return []keyHint{
+		{k.Quit, "quit"},
+		{k.Add, "add"},
+		{k.Search, "search"},
+		{k.Detail, "detail"},
+		{k.Edit, "edit"},
+		{"T", "trash"},
+		{":", "cmd"},
+		{"?", "help"},
+	}
 }
 
 func (m Model) renderFooterPanel() string {
@@ -1975,88 +2007,98 @@ func (m Model) renderTaskList() string {
 	return m.renderTaskListWithHeight(-1)
 }
 
-func (m Model) taskListLineWidth() int {
-	header := "      Title                                   Due"
-	lineWidth := len(header)
-	if m.width > lineWidth {
-		lineWidth = m.width
-	}
-	return lineWidth
-}
-
 func (m Model) renderTaskListWithHeight(maxLines int) string {
 	items := m.visibleItems()
-	header := "      Title                                   Due"
-	lineWidth := m.taskListLineWidth()
+	inner := m.panelInnerWidth()
+
+	titleW := inner - 32
+	if titleW < 10 {
+		titleW = 10
+	}
+	if titleW > 52 {
+		titleW = 52
+	}
+
+	full := func(style lipgloss.Style, s string) string {
+		return style.Width(inner).MaxWidth(inner).Render(s)
+	}
 
 	lines := make([]string, 0)
 	if m.searchActive() {
-		lines = append(lines, m.styles.Accent.Render(fmt.Sprintf("Search: %q (%d result(s))", m.searchQuery, len(items))))
+		search := fmt.Sprintf(" Search: %q (%d result(s))", m.searchQuery, len(items))
+		lines = append(lines, full(m.styles.Accent, search))
 	}
-	lines = append(lines, m.styles.Border.Render(header))
-	lines = append(lines, m.styles.Border.Render(m.ruleLine(lineWidth)))
+	header := fmt.Sprintf("  %-2s %-*s %-4s %-16s  %s", "St", titleW, "Title", "Pri", "Due", "Tags")
+	lines = append(lines, full(m.styles.TableHeader, header))
 
 	itemLines := make([]string, 0, len(items))
 	for i, it := range items {
+		selected := m.cursor == i && m.mode == modeList
 		switch it.kind {
 		case itemTopic:
 			line := ""
 			if isSpecialTopic(it.topic) {
-				line = fmt.Sprintf("   %-2s %s", "📁", it.topic)
+				line = fmt.Sprintf("  %-2s %s", "📁", it.topic)
 			} else {
 				stat := m.topicStats()[it.topic]
-				line = fmt.Sprintf("   %-2s %s (%d/%d)", "📁", it.topic, stat.overdue, stat.total)
+				line = fmt.Sprintf("  %-2s %s (%d/%d)", "📁", it.topic, stat.overdue, stat.total)
 			}
-			if m.cursor == i && m.mode == modeList {
-				line = m.styles.Selection.Render(line)
-			} else if isSpecialTopic(it.topic) {
-				line = m.styles.Heading.Render(line)
-			} else {
-				line = m.styles.Accent.Render(line)
+			switch {
+			case selected:
+				line = full(m.styles.Selection, line)
+			case isSpecialTopic(it.topic):
+				line = full(m.styles.Heading, line)
+			default:
+				line = full(m.styles.Accent, line)
 			}
 			itemLines = append(itemLines, line)
 		case itemTask:
-			title := it.task.Title
-			if len(title) > 40 {
-				title = title[:40]
-			}
+			title := truncateText(it.task.Title, titleW)
 			state := humanDone(it.task.Done)
 			due := displayDate(it.task.Due)
-			badge := overdueBadge(it.task)
-			recBadge := recurrenceBadge(it.task)
 			if due == "" {
 				due = "pending"
 			}
-			body := fmt.Sprintf("   %-2s %-40s %-10s", state, title, due)
-			if badge != "" {
-				if m.cursor == i && m.mode == modeList {
-					body += " " + badge
-				} else {
-					body += " " + m.styles.Danger.Render(badge)
+			pri := fmt.Sprintf("P%d", it.task.Priority)
+			body := fmt.Sprintf("  %-2s %-*s %-4s %-16s", state, titleW, title, pri, due)
+
+			badge := overdueBadge(it.task)
+			recBadge := recurrenceBadge(it.task)
+			if selected {
+				if badge != "" {
+					body += "  " + badge
 				}
+				if recBadge != "" {
+					body += "  " + recBadge
+				}
+				if m.searchActive() && len(it.task.Topics) > 0 {
+					body += "  [" + strings.Join(it.task.Topics, ",") + "]"
+				}
+				itemLines = append(itemLines, full(m.styles.Selection, body))
+				continue
+			}
+			if badge != "" {
+				body += "  " + m.styles.Danger.Render(badge)
 			}
 			if recBadge != "" {
-				if m.cursor == i && m.mode == modeList {
-					body += " " + recBadge
-				} else {
-					body += " " + m.styles.Warning.Render(recBadge)
-				}
+				body += "  " + m.styles.Warning.Render(recBadge)
 			}
 			if m.searchActive() && len(it.task.Topics) > 0 {
-				body += " [" + strings.Join(it.task.Topics, ",") + "]"
+				body += "  " + m.styles.Muted.Render("["+strings.Join(it.task.Topics, ",")+"]")
 			}
-			if m.cursor == i && m.mode == modeList {
-				body = m.styles.Selection.Render(body)
-			} else if m.isTaskSelected(it.task.ID) {
-				body = m.styles.Warning.Render(body)
-			} else if it.task.Done {
-				body = m.styles.Done.Render(body)
+			switch {
+			case m.isTaskSelected(it.task.ID):
+				body = full(m.styles.Warning, body)
+			case it.task.Done:
+				body = full(m.styles.Done, body)
+			default:
+				body = full(lipgloss.NewStyle(), body)
 			}
 			itemLines = append(itemLines, body)
 		}
 	}
 	if len(items) == 0 {
-		itemLines = append(itemLines, m.styles.Muted.Render("(no tasks)"))
+		itemLines = append(itemLines, full(m.styles.Muted, "  (no tasks)"))
 	}
 
 	if maxLines >= 0 {
@@ -2278,6 +2320,20 @@ func buildStyles(theme config.Theme) uiStyles {
 	styles.Status = applyFg(styles.Status, theme.StatusFg)
 	styles.StatusAlt = applyBg(styles.StatusAlt, theme.StatusAltBg)
 	styles.StatusAlt = applyFg(styles.StatusAlt, theme.StatusAltFg)
+
+	// Structural styles derived from the theme so they stay configurable
+	// while giving bada a cohesive, taskdog-like framed look.
+	styles.Panel = applyFg(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()), theme.Border)
+	styles.PanelTitle = applyFg(lipgloss.NewStyle().Bold(true), theme.Accent)
+
+	styles.TableHeader = lipgloss.NewStyle().Bold(true)
+	styles.TableHeader = applyBg(styles.TableHeader, theme.StatusAltBg)
+	styles.TableHeader = applyFg(styles.TableHeader, theme.StatusAltFg)
+
+	styles.KeyCap = lipgloss.NewStyle().Bold(true)
+	styles.KeyCap = applyBg(styles.KeyCap, theme.StatusAltBg)
+	styles.KeyCap = applyFg(styles.KeyCap, theme.StatusAltFg)
+	styles.KeyLabel = applyFg(lipgloss.NewStyle(), theme.Muted)
 
 	return styles
 }
@@ -3497,6 +3553,9 @@ func (m Model) renderStatusBar() string {
 	style := m.styles.Status
 	if m.mode == modeTrash || m.mode == modeNote {
 		style = m.styles.StatusAlt
+	}
+	if m.width > 0 {
+		style = style.Width(m.width).MaxWidth(m.width)
 	}
 	if m.mode == modeReport {
 		return style.Render(fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status))
