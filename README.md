@@ -11,6 +11,36 @@
 **bada** is a Vim-first TUI todo app for capturing what matters, organizing it into projects/tags, and finishing with calm focus.
 
 
+## Interface
+
+bada uses a framed, "taskdog-inspired" terminal UI:
+
+- **Framed panels** — every screen is drawn in a rounded, titled panel
+  (`bada · Tasks`, `bada · Calendar`, `bada · Gantt`, `bada · Trash`,
+  `bada · Help`).
+- **Task table** — columns for state, title, priority (`Pn`), due, and tags,
+  under a colored header bar. Overdue (`[+Nd]`) and recurring (`[recur …]`)
+  badges appear inline.
+- **Full-width selection bar** highlights the current row; done tasks are
+  struck through, multi-selected tasks are tinted.
+- **Status-dot legend** (`● pending  ● done  ● overdue  ● topic`) and a
+  **key-hint footer** showing the active shortcuts.
+- **Full-width status bar** with the current mode, sort, search, and position.
+
+Tasks are grouped under topics at the root; press `Enter`/`l` to drill into a
+topic and `h` to go back. `RecentlyAdded` / `RecentlyDone` are virtual topics.
+
+### Views
+
+Open with `:` commands (tab to autocomplete), or the shortcuts noted:
+
+- `:agenda` — reminder report (also opens on launch).
+- `:calendar` — month grid; `h/l` day, `j/k` week, `H/L` month, `Enter` day detail.
+- `:gantt` — timeline of tasks with start/due bars and a "today" marker.
+- `:help` (or `?`) — full keybinding reference.
+- `:config` — update config and DB paths.
+
+
 ## Daily Use
 
 - Rename: `r` (shows current/new), `Enter` saves, `Esc` cancels.
@@ -21,6 +51,8 @@
 - Search: `/` opens a query prompt; `Enter` applies, `Esc` cancels (submit empty to clear).
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview (works for tasks or topic rows; not available for RecentlyAdded/RecentlyDone).
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
+- Help: `?` (or `:help`) opens the full keybinding reference.
+- Other views: `:calendar` (month grid) and `:gantt` (timeline).
 
 ## Recurrence Syntax
 
@@ -44,6 +76,15 @@ Notes:
 ## Theme
 
 Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to customize colors for headings, accents, status bar, and selection highlight.
+
+The UI is framed in rounded panels with a colored table-header bar, a status-dot
+legend, and a key-hint footer. Two notable theme keys drive the framing:
+
+- `border` — color of the rounded panel frames.
+- `status_alt_bg` / `status_alt_fg` — the table-header bar and the key-hint chips.
+
+`config.example.toml` ships a light default plus a commented **dark slate**
+(taskdog-style) palette — copy that block over the `[theme]` section to switch.
 
 ## Trash
 

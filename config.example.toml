@@ -41,3 +41,24 @@ status_bg = "#E5E7EB"
 status_fg = "#0B0F14"
 status_alt_bg = "#CFE8FF"
 status_alt_fg = "#0B0F14"
+
+# --- Dark slate theme (taskdog-style) -----------------------------------
+# To switch, replace the [theme] block above with the values below.
+# status_alt_bg/fg drive the framed table-header bar and the key-hint chips,
+# and border drives the rounded panel frames.
+#
+# [theme]
+# title        = "#7AA2F7"  # blue
+# heading      = "#89DDFF"  # cyan
+# accent       = "#FF9E64"  # orange
+# muted        = "#565F73"  # slate gray
+# success      = "#9ECE6A"  # green   (done)
+# warning      = "#E0AF68"  # amber   (pending / recurring)
+# danger       = "#F7768E"  # red     (overdue)
+# border       = "#414868"  # slate-blue panel frames
+# selection_bg = "#2E3C5D"  # blue selection bar
+# selection_fg = "#C0CAF5"
+# status_bg    = "#1F2430"
+# status_fg    = "#C0CAF5"
+# status_alt_bg = "#2A3F5F" # blue header bar / key chips
+# status_alt_fg = "#C0CAF5"

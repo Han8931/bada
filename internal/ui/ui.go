@@ -107,6 +107,68 @@ type metaState struct {
 	completions   []string
 	completionIdx int
 	lastInput     string
+	expanded      bool   // detail fields revealed in the Create/Edit modal
+	validation    string // inline validation message shown in the modal
+	dueComponent  int    // which part of the Due stepper is selected (0=Y..4=min)
+}
+
+// fieldMore is a sentinel "index" for the modal's expand/collapse toggle row.
+const fieldMore = -1
+
+// metaCoreFields are the field indices shown by default in the modal:
+// Title, Topics, Priority, Due.
+func metaCoreFields() []int { return []int{0, 1, 3, 4} }
+
+// metaDetailFields are revealed when the modal is expanded:
+// Tags, Start, Timezone, Recurrence, Interval.
+func metaDetailFields() []int { return []int{2, 5, 6, 7, 8} }
+
+// order returns the navigable rows in the modal, in display order. The
+// expand/collapse toggle (fieldMore) always sits between the core fields and
+// the (optional) detail fields.
+func (ms metaState) order() []int {
+	order := append([]int{}, metaCoreFields()...)
+	order = append(order, fieldMore)
+	if ms.expanded {
+		order = append(order, metaDetailFields()...)
+	}
+	return order
+}
+
+// orderPos is the position of the current row within order().
+func (ms metaState) orderPos() int {
+	for i, f := range ms.order() {
+		if f == ms.index {
+			return i
+		}
+	}
+	return 0
+}
+
+// metaShortLabel is the compact field label used in the modal.
+func metaShortLabel(idx int) string {
+	switch idx {
+	case 0:
+		return "Title"
+	case 1:
+		return "Topic"
+	case 2:
+		return "Tags"
+	case 3:
+		return "Priority"
+	case 4:
+		return "Due"
+	case 5:
+		return "Start"
+	case 6:
+		return "Timezone"
+	case 7:
+		return "Recurs"
+	case 8:
+		return "Interval"
+	default:
+		return ""
+	}
 }
 
 type Model struct {
@@ -492,6 +554,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.status = "Sorted by created time"
 	case m.cfg.Keys.Trash, "T":
 		return m.enterTrashView()
+	case "?":
+		return m.enterHelpView()
 	case "l", "right", "enter":
 		if m.currentTopic == "" && len(vis) > 0 && m.cursor < len(vis) {
 			it := vis[m.cursor]
@@ -509,6 +573,10 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	var b strings.Builder
+
+	if m.meta != nil {
+		return m.fillView(m.renderMetaModalView())
+	}
 
 	if m.mode == modeNote {
 		b.WriteString(m.renderNoteView())
@@ -1200,33 +1268,34 @@ func (m Model) selectedTaskList() []storage.Task {
 	return selected
 }
 
-func (m Model) renderCalendarView() string {
+func (m Model) calendarFooter() string {
 	if m.calendarDetail {
-		return m.renderCalendarDetail()
+		return m.hintBar([]keyHint{
+			{"enter", "back"},
+			{"h/l", "day"},
+			{"j/k", "week"},
+			{m.cfg.Keys.Cancel, "close"},
+		})
 	}
-	return m.renderCalendarMonth()
+	return m.hintBar([]keyHint{
+		{"h/l", "day"},
+		{"j/k", "week"},
+		{"H/L", "month"},
+		{"enter", "day"},
+		{m.cfg.Keys.Cancel, "close"},
+	})
 }
 
-func (m Model) renderCalendarMonth() string {
-	var b strings.Builder
-	monthTitle := m.calendarMonth.Format("January 2006")
-	b.WriteString(m.styles.Accent.Render("Calendar • " + monthTitle))
-	b.WriteString("\n\n")
-	b.WriteString(m.renderCalendarGrid())
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render("h/l day • j/k week • H/L month • enter day • esc/q close"))
-	return b.String()
-}
-
-func (m Model) renderCalendarDetail() string {
-	var b strings.Builder
-	title := fmt.Sprintf("Calendar • %s", m.calendarDay.Format("Mon, Jan 2, 2006"))
-	b.WriteString(m.styles.Accent.Render(title))
-	b.WriteString("\n\n")
-	b.WriteString(m.renderCalendarDayList())
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Muted.Render("enter back • h/l day • j/k week • esc/q close"))
-	return b.String()
+func (m Model) renderCalendarView() string {
+	var title, body string
+	if m.calendarDetail {
+		title = "bada · Calendar — " + m.calendarDay.Format("Mon, Jan 2, 2006")
+		body = m.renderCalendarDayList()
+	} else {
+		title = "bada · Calendar — " + m.calendarMonth.Format("January 2006")
+		body = m.renderCalendarGrid()
+	}
+	return m.panel(title, body) + "\n" + m.calendarFooter()
 }
 
 func (m Model) renderCalendarGrid() string {
@@ -1241,7 +1310,7 @@ func (m Model) renderCalendarGrid() string {
 	nextMonthStart := monthStart.AddDate(0, 1, 0)
 	cellWidth := 12
 	if m.width > 0 {
-		cellWidth = clampInt(m.width/7, 10, 20)
+		cellWidth = clampInt(m.panelInnerWidth()/7, 10, 20)
 	}
 	cellHeight := 4
 	maxTasks := 2
@@ -1527,34 +1596,39 @@ func (m Model) renderReportWithHeight(maxLines int) string {
 	return strings.Join(lines[scroll:end], "\n")
 }
 
+func (m Model) helpFooter() string {
+	return m.hintBar([]keyHint{
+		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "scroll"},
+		{m.cfg.Keys.Cancel, "close"},
+		{m.cfg.Keys.Quit, "quit"},
+	})
+}
+
 func (m Model) renderHelpView() string {
-	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Help") + "\n\n"
-	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
+	footer := m.helpFooter()
 	bodyMax := 0
 	if m.height > 0 {
-		bodyMax = m.height - 1 - countLines(header) - countLines(footer)
-		if bodyMax < 0 {
-			bodyMax = 0
+		bodyMax = m.height - 1 - 2 - countLines(footer) // 2 = panel borders
+		if bodyMax < 1 {
+			bodyMax = 1
 		}
 	}
-	var b strings.Builder
-	b.WriteString(header)
+	var body string
 	if m.height > 0 {
-		b.WriteString(m.renderHelpBody(bodyMax))
+		body = m.renderHelpBody(bodyMax)
 	} else {
-		b.WriteString(m.helpContent())
+		body = m.helpContent()
 	}
-	b.WriteString("\n")
-	b.WriteString(footer)
-	return b.String()
+	return m.panel("bada · Help", body) + "\n" + footer
 }
 
 func (m Model) helpContent() string {
 	return strings.TrimRight(fmt.Sprintf(`Commands:
   :agenda    Open reminder report
   :calendar  Open calendar view
+  :gantt     Open gantt timeline
   :config    Update config and db paths
-  :help      Open this help screen
+  :help / ?  Open this help screen
 
 List Navigation:
   %s/%s  Move cursor
@@ -1564,7 +1638,7 @@ List Navigation:
   gg/G   Jump to top/bottom
 
 Tasks:
-  %s     Add task (opens metadata editor)
+  %s     Add task (Create Task dialog)
   %s     Toggle done
   %s     Delete (purge to trash)
   %s     Edit metadata
@@ -1601,9 +1675,7 @@ func (m Model) helpMaxScroll() int {
 	if m.height <= 0 {
 		return 0
 	}
-	header := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Help") + "\n\n"
-	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
-	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
+	bodyMax := m.height - 1 - 2 - countLines(m.helpFooter()) // 2 = panel borders
 	if bodyMax <= 0 {
 		return 0
 	}
@@ -1632,89 +1704,90 @@ func (m Model) renderHelpBody(maxLines int) string {
 }
 
 func (m Model) renderTrashView() string {
-	header := m.trashViewHeader()
 	footer := m.trashViewFooter()
 	bodyMax := 0
 	if m.height > 0 {
-		bodyMax = m.height - 1 - countLines(header) - countLines(footer)
-		if bodyMax < 0 {
-			bodyMax = 0
+		bodyMax = m.height - 1 - 2 - countLines(footer) // 2 = panel borders
+		if bodyMax < 1 {
+			bodyMax = 1
 		}
 	}
-	var b strings.Builder
-	b.WriteString(header)
+	var body string
 	if m.height > 0 {
-		b.WriteString(m.renderTrashBody(bodyMax))
+		body = m.renderTrashBody(bodyMax)
 	} else {
-		b.WriteString(m.renderTrashContent())
+		body = m.renderTrashContent()
 	}
-	b.WriteString("\n")
-	b.WriteString(footer)
-	return b.String()
-}
-
-func (m Model) trashViewHeader() string {
-	title := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("# Trash") + "\n\n"
-	return title + m.renderTrashHeaderLines() + "\n"
+	return m.panel("bada · Trash", body) + "\n" + footer
 }
 
 func (m Model) trashViewFooter() string {
-	return m.styles.Muted.Render("up/down scroll • space select • u restore • P purge • esc/q close")
+	return m.hintBar([]keyHint{
+		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "move"},
+		{"space", "select"},
+		{"u", "restore"},
+		{"P", "purge"},
+		{m.cfg.Keys.Cancel, "close"},
+	})
 }
 
-func (m Model) renderTrashHeaderLines() string {
-	header := "   🗑 DeletedAt         Title                          Topics"
-	lineWidth := len(header)
-	if m.width > lineWidth {
-		lineWidth = m.width
-	}
-	line := m.styles.Heading.Render(header)
-	rule := m.styles.Border.Render(m.ruleLine(lineWidth))
-	return line + "\n" + rule
+func (m Model) trashHeaderLine() string {
+	inner := m.panelInnerWidth()
+	header := "  🗑 DeletedAt          Title                          Topics"
+	return m.styles.TableHeader.Width(inner).MaxWidth(inner).Render(header)
 }
 
 func (m Model) renderTrashContent() string {
+	head := m.trashHeaderLine()
 	rows := m.trashRows()
 	if len(rows) == 0 {
-		return m.styles.Muted.Render("(trash is empty)")
+		return head + "\n" + m.styles.Muted.Render("  (trash is empty)")
 	}
-	return strings.Join(rows, "\n")
+	return head + "\n" + strings.Join(rows, "\n")
 }
 
 func (m Model) renderTrashBody(maxLines int) string {
 	if maxLines <= 0 {
 		return ""
 	}
+	head := m.trashHeaderLine()
+	rowMax := maxLines - 1 // reserve a line for the column header
 	rows := m.trashRows()
 	if len(rows) == 0 {
-		return m.styles.Muted.Render("(trash is empty)")
+		return head + "\n" + m.styles.Muted.Render("  (trash is empty)")
 	}
-	maxScroll := len(rows) - maxLines
+	if rowMax < 1 {
+		return head
+	}
+	maxScroll := len(rows) - rowMax
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
 	scroll := clampInt(m.trashScroll, 0, maxScroll)
-	end := scroll + maxLines
+	end := scroll + rowMax
 	if end > len(rows) {
 		end = len(rows)
 	}
-	return strings.Join(rows[scroll:end], "\n")
+	return head + "\n" + strings.Join(rows[scroll:end], "\n")
 }
 
 func (m Model) trashRows() []string {
+	inner := m.panelInnerWidth()
+	full := func(style lipgloss.Style, s string) string {
+		return style.Width(inner).MaxWidth(inner).Render(s)
+	}
 	rows := make([]string, 0, len(m.trash))
 	for i, entry := range m.trash {
-		cursor := " "
-		title := entry.Task.Title
-		if len(title) > 30 {
-			title = title[:30]
-		}
+		title := truncateText(entry.Task.Title, 30)
 		deleted := entry.DeletedAt.Format("2006-01-02 15:04")
-		line := fmt.Sprintf("%s 🗑 %-18s %-30s %-16s", cursor, deleted, title, strings.Join(entry.Task.Topics, ","))
-		if m.mode == modeTrash && m.trashCursor == i {
-			line = m.styles.Selection.Render(line)
-		} else if m.trashSelected != nil && m.trashSelected[i] {
-			line = m.styles.Accent.Render(line)
+		line := fmt.Sprintf("  🗑 %-18s %-30s %-16s", deleted, title, strings.Join(entry.Task.Topics, ","))
+		switch {
+		case m.mode == modeTrash && m.trashCursor == i:
+			line = full(m.styles.Selection, line)
+		case m.trashSelected != nil && m.trashSelected[i]:
+			line = full(m.styles.Accent, line)
+		default:
+			line = full(lipgloss.NewStyle(), line)
 		}
 		rows = append(rows, line)
 	}
@@ -1725,9 +1798,8 @@ func (m Model) trashBodyMaxLines() int {
 	if m.height <= 0 {
 		return 0
 	}
-	header := m.trashViewHeader()
-	footer := m.trashViewFooter()
-	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
+	// rows available inside the panel (minus borders, footer, and column header)
+	bodyMax := m.height - 1 - 2 - countLines(m.trashViewFooter()) - 1
 	if bodyMax < 0 {
 		bodyMax = 0
 	}
@@ -1752,27 +1824,39 @@ func (m *Model) adjustTrashScroll() {
 	m.trashScroll = clampInt(m.trashScroll, 0, maxScroll)
 }
 
+func (m Model) ganttFooter() string {
+	return m.hintBar([]keyHint{
+		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "scroll"},
+		{m.cfg.Keys.Cancel, "close"},
+		{m.cfg.Keys.Quit, "quit"},
+	})
+}
+
 func (m Model) renderGanttView() string {
-	title := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
-	header := title + m.renderGanttHeaderLines() + "\n"
-	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
+	footer := m.ganttFooter()
+	headerLines := m.renderGanttHeaderLines()
+	headerCount := 0
+	if strings.TrimSpace(headerLines) != "" {
+		headerCount = countLines(headerLines)
+	}
 	bodyMax := 0
 	if m.height > 0 {
-		bodyMax = m.height - 1 - countLines(header) - countLines(footer)
-		if bodyMax < 0 {
-			bodyMax = 0
+		bodyMax = m.height - 1 - 2 - countLines(footer) - headerCount // 2 = panel borders
+		if bodyMax < 1 {
+			bodyMax = 1
 		}
 	}
-	var b strings.Builder
-	b.WriteString(header)
+	var rows string
 	if m.height > 0 {
-		b.WriteString(m.renderGanttBody(bodyMax))
+		rows = m.renderGanttBody(bodyMax)
 	} else {
-		b.WriteString(m.ganttContent())
+		rows = m.ganttContent()
 	}
-	b.WriteString("\n")
-	b.WriteString(footer)
-	return b.String()
+	body := rows
+	if headerCount > 0 {
+		body = headerLines + "\n" + rows
+	}
+	return m.panel("bada · Gantt", body) + "\n" + footer
 }
 
 func (m Model) renderGanttHeaderLines() string {
@@ -1804,10 +1888,12 @@ func (m Model) ganttMaxScroll() int {
 	if m.height <= 0 {
 		return 0
 	}
-	title := m.renderListBanner() + "\n\n" + m.styles.Accent.Render("Gantt View") + "\n\n"
-	header := title + m.renderGanttHeaderLines() + "\n"
-	footer := m.styles.Muted.Render("up/down scroll • esc/q close")
-	bodyMax := m.height - 1 - countLines(header) - countLines(footer)
+	headerLines := m.renderGanttHeaderLines()
+	headerCount := 0
+	if strings.TrimSpace(headerLines) != "" {
+		headerCount = countLines(headerLines)
+	}
+	bodyMax := m.height - 1 - 2 - countLines(m.ganttFooter()) - headerCount // 2 = panel borders
 	if bodyMax <= 0 {
 		return 0
 	}
@@ -1868,7 +1954,7 @@ func (m Model) ganttDataRowsWithHeader() ([]string, string) {
 	if len(items) == 0 {
 		barWidth := 40
 		if m.width > 0 {
-			barWidth = clampInt(m.width-52, 20, 60)
+			barWidth = clampInt(m.panelInnerWidth()-52, 20, 60)
 		}
 		fallbackStart := normalizeDate(time.Now())
 		header := buildGanttHeader(fallbackStart, 14, barWidth)
@@ -1896,7 +1982,7 @@ func (m Model) ganttDataRowsWithHeader() ([]string, string) {
 	}
 	barWidth := 40
 	if m.width > 0 {
-		barWidth = clampInt(m.width-52, 20, 60)
+		barWidth = clampInt(m.panelInnerWidth()-52, 20, 60)
 	}
 	rows := make([]string, 0, len(items))
 	header := buildGanttHeader(minDate, spanDays, barWidth)
@@ -2428,13 +2514,11 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 		interval:  intervalString(t.RecurrenceInterval),
 		recurring: t.Recurring,
 		index:     0,
+		expanded:  true, // editing: show every field up front
 	}
-	m.input.SetValue(m.meta.currentValue())
-	m.input.CursorEnd()
-	m.input.Placeholder = m.meta.currentLabel()
-	m.input.Focus()
+	m.focusMetaField()
 	m.mode = modeMetadata
-	m.status = "Edit metadata: up/down or tab/shift+tab to move, enter to save/next, esc to cancel"
+	m.status = m.metaPrompt()
 	return m, nil
 }
 
@@ -2443,203 +2527,383 @@ func (m Model) startMetadataAdd() (tea.Model, tea.Cmd) {
 	if m.currentTopic != "" && !isSpecialTopic(m.currentTopic) {
 		defaultTopic = m.currentTopic
 	}
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	m.meta = &metaState{
 		taskID:    0,
 		title:     "",
 		topic:     defaultTopic,
 		tags:      "",
 		priority:  "",
-		due:       "",
+		due:       today.Format("2006-01-02 15:04"), // default to today; x clears
 		start:     "",
 		timezone:  defaultTimezone(""),
 		rule:      "",
 		interval:  "",
 		recurring: false,
 		index:     0,
+		expanded:  false, // adding: start lean, reveal details on demand
 	}
-	m.input.SetValue(m.meta.currentValue())
-	m.input.CursorEnd()
-	m.input.Placeholder = m.meta.currentLabel()
-	m.input.Focus()
+	m.focusMetaField()
 	m.mode = modeMetadata
-	m.status = "Add task: fill fields and press Enter to save"
+	m.status = m.metaPrompt()
 	return m, nil
 }
 
+// focusMetaField syncs the shared text input to the current modal field and
+// resets any pending autocomplete state.
+func (m *Model) focusMetaField() {
+	if m.meta == nil {
+		return
+	}
+	m.meta.completions = nil
+	m.meta.completionIdx = 0
+	m.meta.lastInput = ""
+	m.input.Width = 36
+	// The toggle row and the stepper fields (Priority, Due) aren't typed into,
+	// so the text input stays blurred there.
+	if m.meta.index == fieldMore || m.meta.index == 3 || m.meta.index == 4 {
+		if m.meta.index == 4 {
+			m.meta.dueComponent = 2 // default to the day part
+		}
+		m.input.SetValue(m.meta.currentValue())
+		m.input.Blur()
+		return
+	}
+	m.input.SetValue(m.meta.currentValue())
+	m.input.CursorEnd()
+	m.input.Placeholder = metaShortLabel(m.meta.index)
+	m.input.Focus()
+}
+
+// metaMove advances the modal cursor by delta rows (wrapping), saving the
+// current field's value first.
+func (m *Model) metaMove(delta int) {
+	if m.meta == nil {
+		return
+	}
+	if m.meta.index != fieldMore {
+		m.meta.setCurrentValue(m.input.Value())
+	}
+	ord := m.meta.order()
+	pos := wrapIndex(m.meta.orderPos()+delta, len(ord))
+	m.meta.index = ord[pos]
+	m.meta.validation = ""
+	m.focusMetaField()
+	m.status = m.metaPrompt()
+}
+
+// toggleMetaDetails expands or collapses the modal's detail section.
+func (m *Model) toggleMetaDetails() {
+	if m.meta == nil {
+		return
+	}
+	m.meta.expanded = !m.meta.expanded
+	if m.meta.expanded {
+		m.status = "Details shown"
+	} else {
+		m.status = "Details hidden"
+	}
+}
+
+// updateMetadataMode drives the Create/Edit Task dialog as a plain form: type
+// directly into text fields, Tab/arrows move between fields, +/- and ←/→ drive
+// the Priority/Due/Recurrence steppers, Enter/^S save, Esc cancels.
 func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.meta == nil {
+		return m, nil
+	}
+	onMore := m.meta.index == fieldMore
+	onPriority := m.meta.index == 3
+	onRecurrence := m.meta.index == 7
+	onDue := m.meta.index == 4
+
 	switch key {
 	case m.cfg.Keys.Cancel, "esc":
-		if m.meta == nil {
-			return m, nil
-		}
-		m.meta.setCurrentValue(m.input.Value())
-		var err error
-		m, err = m.applyMetadataAndReload()
-		if err != nil {
-			m.status = fmt.Sprintf("save failed: %v", err)
-			return m, nil
-		}
+		// Esc cancels and discards (single press).
 		m.meta = nil
 		m.mode = modeList
 		m.input.Blur()
-		m.status = "Metadata saved"
+		m.status = "Cancelled"
 		return m, nil
-	case "tab":
-		if m.meta == nil {
-			return m, nil
-		}
-		currentInput := m.input.Value()
-		// Check if input changed since last tab - reset completions
-		if currentInput != m.meta.lastInput {
-			m.meta.completions = m.metaCompletions(m.meta.index, currentInput)
-			m.meta.completionIdx = 0
-			m.meta.lastInput = currentInput
-		}
-		if len(m.meta.completions) == 0 {
-			m.status = "No completions available"
-			return m, nil
-		}
-		// Apply current completion
-		completion := m.meta.completions[m.meta.completionIdx]
-		m.input.SetValue(completion)
-		m.input.CursorEnd()
-		m.meta.lastInput = completion
-		// Cycle to next completion for next tab press
-		m.meta.completionIdx = (m.meta.completionIdx + 1) % len(m.meta.completions)
-		m.status = fmt.Sprintf("Completion %d/%d: %s", m.meta.completionIdx, len(m.meta.completions), completion)
-		return m, nil
-	case "shift+tab":
-		if m.meta == nil {
-			return m, nil
-		}
-		currentInput := m.input.Value()
-		// Check if input changed since last tab - reset completions
-		if currentInput != m.meta.lastInput {
-			m.meta.completions = m.metaCompletions(m.meta.index, currentInput)
-			m.meta.completionIdx = len(m.meta.completions) - 1
-			m.meta.lastInput = currentInput
-		}
-		if len(m.meta.completions) == 0 {
-			m.status = "No completions available"
-			return m, nil
-		}
-		// Cycle to previous completion
-		m.meta.completionIdx--
-		if m.meta.completionIdx < 0 {
-			m.meta.completionIdx = len(m.meta.completions) - 1
-		}
-		// Apply current completion
-		completion := m.meta.completions[m.meta.completionIdx]
-		m.input.SetValue(completion)
-		m.input.CursorEnd()
-		m.meta.lastInput = completion
-		m.status = fmt.Sprintf("Completion %d/%d: %s", m.meta.completionIdx+1, len(m.meta.completions), completion)
-		return m, nil
-	case "down":
-		if m.meta == nil {
-			return m, nil
-		}
-		m.meta.setCurrentValue(m.input.Value())
-		m.meta.index = wrapIndex(m.meta.index+1, len(metaFields()))
-		m.meta.completions = nil
-		m.meta.completionIdx = 0
-		m.meta.lastInput = ""
-		m.input.SetValue(m.meta.currentValue())
-		m.input.CursorEnd()
-		m.input.Placeholder = m.meta.currentLabel()
-		m.status = m.metaPrompt()
-		return m, nil
-	case "up":
-		if m.meta == nil {
-			return m, nil
-		}
-		m.meta.setCurrentValue(m.input.Value())
-		m.meta.index = wrapIndex(m.meta.index-1, len(metaFields()))
-		m.meta.completions = nil
-		m.meta.completionIdx = 0
-		m.meta.lastInput = ""
-		m.input.SetValue(m.meta.currentValue())
-		m.input.CursorEnd()
-		m.input.Placeholder = m.meta.currentLabel()
-		m.status = m.metaPrompt()
-		return m, nil
+	case "ctrl+s":
+		return m.saveMeta()
 	case m.cfg.Keys.Confirm, "enter":
-		if m.meta == nil {
+		if onMore {
+			m.toggleMetaDetails()
+			m.metaMove(1)
 			return m, nil
 		}
-		m.meta.setCurrentValue(m.input.Value())
-		if m.meta.taskID == 0 && m.meta.index < len(metaFields())-1 {
-			m.meta.index++
-			m.meta.completions = nil
-			m.meta.completionIdx = 0
-			m.meta.lastInput = ""
-			m.input.SetValue(m.meta.currentValue())
-			m.input.CursorEnd()
-			m.input.Placeholder = m.meta.currentLabel()
-			m.status = m.metaPrompt()
-			return m, nil
-		}
-		var err error
-		m, err = m.applyMetadataAndReload()
-		if err != nil {
-			m.status = fmt.Sprintf("save failed: %v", err)
-			return m, nil
-		}
-		if m.meta.index >= len(metaFields())-1 {
-			m.meta = nil
-			m.mode = modeList
-			m.input.Blur()
-			m.status = "Metadata saved"
-			return m, nil
-		}
-		m.meta.index++
-		m.meta.completions = nil
-		m.meta.completionIdx = 0
-		m.meta.lastInput = ""
-		m.input.SetValue(m.meta.currentValue())
-		m.input.CursorEnd()
-		m.input.Placeholder = m.meta.currentLabel()
-		m.status = m.metaPrompt()
+		return m.saveMeta()
+	case "tab", "down":
+		m.metaMove(1)
 		return m, nil
-	case "+":
-		if m.meta != nil && m.meta.index == 3 {
-			val, _ := strconv.Atoi(filterDigits(m.input.Value()))
-			if val < 5 {
-				val++
-			}
-			m.meta.priority = fmt.Sprintf("%d", val)
-			m.input.SetValue(m.meta.priority)
-			m.status = m.metaPrompt()
+	case "shift+tab", "up":
+		m.metaMove(-1)
+		return m, nil
+	case "ctrl+n":
+		return m.cycleCompletion(1), nil
+	case "ctrl+p":
+		return m.cycleCompletion(-1), nil
+	case " ", "space":
+		if onMore {
+			m.toggleMetaDetails()
+			m.metaMove(1)
 			return m, nil
 		}
-		// not editing priority; handle as normal input so characters like '-' go through for dates
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		m.applyMetaInputSanitizer()
-		return m, cmd
-	case "-":
-		if m.meta != nil && m.meta.index == 3 {
-			val, _ := strconv.Atoi(filterDigits(m.input.Value()))
-			if val > 0 {
-				val--
+	case "left":
+		if onMore {
+			if m.meta.expanded {
+				m.toggleMetaDetails()
 			}
-			m.meta.priority = fmt.Sprintf("%d", val)
-			m.input.SetValue(m.meta.priority)
-			m.status = m.metaPrompt()
 			return m, nil
 		}
-		// not editing priority; handle as normal input so '-' works in dates
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		m.applyMetaInputSanitizer()
-		return m, cmd
-	default:
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		m.applyMetaInputSanitizer()
-		return m, cmd
+		if onPriority {
+			m.stepPriority(-1)
+			return m, nil
+		}
+		if onRecurrence {
+			m.cycleRecurrence(-1)
+			return m, nil
+		}
+		if onDue {
+			m.moveDueComponent(-1)
+			return m, nil
+		}
+	case "right":
+		if onMore {
+			if !m.meta.expanded {
+				m.toggleMetaDetails()
+				m.metaMove(1)
+			}
+			return m, nil
+		}
+		if onPriority {
+			m.stepPriority(1)
+			return m, nil
+		}
+		if onRecurrence {
+			m.cycleRecurrence(1)
+			return m, nil
+		}
+		if onDue {
+			m.moveDueComponent(1)
+			return m, nil
+		}
+	case "+", "=":
+		if onPriority {
+			m.stepPriority(1)
+			return m, nil
+		}
+		if onDue {
+			m.stepDue(1)
+			return m, nil
+		}
+	case "-", "_":
+		if onPriority {
+			m.stepPriority(-1)
+			return m, nil
+		}
+		if onDue {
+			m.stepDue(-1)
+			return m, nil
+		}
+	case "x":
+		if onDue {
+			m.clearDue() // due isn't text; x clears it
+			return m, nil
+		}
 	}
+
+	// The toggle row and the stepper fields don't accept typed text.
+	if onMore || onPriority || onDue {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.applyMetaInputSanitizer()
+	m.meta.validation = ""
+	return m, cmd
+}
+
+// saveMeta validates and commits the modal, returning to the list on success
+// or keeping the modal open (with an inline message) on a validation error.
+func (m Model) saveMeta() (tea.Model, tea.Cmd) {
+	if m.meta == nil {
+		return m, nil
+	}
+	if m.meta.index != fieldMore {
+		m.meta.setCurrentValue(m.input.Value())
+	}
+	if strings.TrimSpace(m.meta.title) == "" {
+		m.meta.validation = "Title is required"
+		m.meta.index = 0
+		m.focusMetaField()
+		m.status = "Title is required"
+		return m, nil
+	}
+	verb := "created"
+	if m.meta.taskID != 0 {
+		verb = "saved"
+	}
+	var err error
+	m, err = m.applyMetadataAndReload()
+	if err != nil {
+		m.status = fmt.Sprintf("save failed: %v", err)
+		return m, nil
+	}
+	// applyMetadataAndReload reports field-level problems via status without
+	// committing; keep the modal open so the user can fix them.
+	if strings.HasPrefix(m.status, "due date invalid") ||
+		strings.HasPrefix(m.status, "priority invalid") ||
+		strings.HasPrefix(m.status, "start date invalid") {
+		m.meta.validation = m.status
+		return m, nil
+	}
+	m.meta = nil
+	m.mode = modeList
+	m.input.Blur()
+	m.status = "Task " + verb
 	return m, nil
+}
+
+// cycleCompletion advances the autocomplete suggestion for the current field.
+func (m Model) cycleCompletion(dir int) Model {
+	if m.meta == nil || m.meta.index == fieldMore {
+		return m
+	}
+	currentInput := m.input.Value()
+	if currentInput != m.meta.lastInput {
+		m.meta.completions = m.metaCompletions(m.meta.index, currentInput)
+		if dir >= 0 {
+			m.meta.completionIdx = 0
+		} else {
+			m.meta.completionIdx = len(m.meta.completions) - 1
+		}
+		m.meta.lastInput = currentInput
+	}
+	if len(m.meta.completions) == 0 {
+		m.status = "No completions available"
+		return m
+	}
+	completion := m.meta.completions[m.meta.completionIdx]
+	m.input.SetValue(completion)
+	m.input.CursorEnd()
+	m.meta.setCurrentValue(completion)
+	m.meta.lastInput = completion
+	m.meta.completionIdx = wrapIndex(m.meta.completionIdx+dir, len(m.meta.completions))
+	m.status = fmt.Sprintf("Completion: %s", completion)
+	return m
+}
+
+// stepPriority nudges the Priority field within the 0–5 range.
+func (m *Model) stepPriority(delta int) {
+	if m.meta == nil {
+		return
+	}
+	val, _ := strconv.Atoi(filterDigits(m.meta.priority))
+	val += delta
+	if val < 0 {
+		val = 0
+	}
+	if val > 5 {
+		val = 5
+	}
+	m.meta.priority = fmt.Sprintf("%d", val)
+	m.input.SetValue(m.meta.priority)
+	m.meta.validation = ""
+	m.status = m.metaPrompt()
+}
+
+// cycleRecurrence steps the Recurrence field through "off" and the common rules.
+func (m *Model) cycleRecurrence(delta int) {
+	if m.meta == nil {
+		return
+	}
+	options := append([]string{""}, commonRecurrenceRules()...)
+	cur := strings.TrimSpace(strings.ToLower(m.meta.rule))
+	idx := 0
+	for i, o := range options {
+		if strings.ToLower(o) == cur {
+			idx = i
+			break
+		}
+	}
+	idx = wrapIndex(idx+delta, len(options))
+	m.meta.rule = options[idx]
+	m.input.SetValue(m.meta.rule)
+	m.input.CursorEnd()
+	m.meta.validation = ""
+	m.status = m.metaPrompt()
+}
+
+// dueTime resolves the Due field to a concrete time, falling back to today.
+func (m Model) dueTime(now time.Time) time.Time {
+	if t, err := parseDueInput(m.meta.due, now); err == nil && t.Valid {
+		return t.Time
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+}
+
+// stepDue adjusts the selected component of the Due stepper. The first press on
+// an empty field seeds it with today's date so the user never types a baseline.
+func (m *Model) stepDue(delta int) {
+	if m.meta == nil {
+		return
+	}
+	now := time.Now()
+	if strings.TrimSpace(m.meta.due) == "" {
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		m.meta.due = today.Format("2006-01-02 15:04")
+		m.input.SetValue(m.meta.due)
+		m.meta.validation = ""
+		m.status = m.metaPrompt()
+		return
+	}
+	t := m.dueTime(now)
+	switch m.meta.dueComponent {
+	case 0:
+		t = t.AddDate(delta, 0, 0)
+	case 1:
+		t = t.AddDate(0, delta, 0)
+	case 2:
+		t = t.AddDate(0, 0, delta)
+	case 3:
+		t = t.Add(time.Duration(delta) * time.Hour)
+	case 4:
+		t = t.Add(time.Duration(delta) * time.Minute)
+	}
+	m.meta.due = t.Format("2006-01-02 15:04")
+	m.input.SetValue(m.meta.due)
+	m.meta.validation = ""
+	m.status = m.metaPrompt()
+}
+
+// moveDueComponent moves the Due stepper's selection across Y/M/D/H/min.
+func (m *Model) moveDueComponent(delta int) {
+	if m.meta == nil {
+		return
+	}
+	c := m.meta.dueComponent + delta
+	if c < 0 {
+		c = 0
+	}
+	if c > 4 {
+		c = 4
+	}
+	m.meta.dueComponent = c
+	m.status = m.metaPrompt()
+}
+
+// clearDue removes the due date entirely.
+func (m *Model) clearDue() {
+	if m.meta == nil {
+		return
+	}
+	m.meta.due = ""
+	m.input.SetValue("")
+	m.meta.validation = ""
+	m.status = m.metaPrompt()
 }
 
 func (m *Model) applyMetaInputSanitizer() {
@@ -2650,8 +2914,8 @@ func (m *Model) applyMetaInputSanitizer() {
 	switch m.meta.index {
 	case 3: // priority
 		m.input.SetValue(filterDigits(m.input.Value()))
-	case 4: // due datetime
-		m.input.SetValue(filterDateTime(m.input.Value()))
+	case 4: // due datetime (accepts natural language: today, tomorrow, in 3d, ...)
+		m.input.SetValue(filterDueInput(m.input.Value()))
 	case 5: // start date
 		m.input.SetValue(filterDate(m.input.Value()))
 	case 6: // timezone
@@ -2734,8 +2998,11 @@ func (m Model) metaPrompt() string {
 	if m.meta == nil {
 		return ""
 	}
-	return fmt.Sprintf("Editing %s (field %d of %d). Enter to advance, Esc to cancel, up/down or tab/shift+tab to move.",
-		m.meta.currentLabel(), m.meta.index+1, len(metaFields()))
+	verb := "Create task"
+	if m.meta.taskID != 0 {
+		verb = "Edit task"
+	}
+	return verb + ": tab/↑↓ move · +/- adjust · ⏎/^S save · esc cancel · ^n/^p complete"
 }
 
 func (m Model) flushPendingSort(nextKey string) Model {
@@ -2768,7 +3035,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		m.status = fmt.Sprintf("priority invalid: %v", err)
 		return m, nil
 	}
-	due, err := parseDateTime(m.meta.due)
+	due, err := parseDueInput(m.meta.due, time.Now())
 	if err != nil {
 		m.status = fmt.Sprintf("due date invalid: %v", err)
 		return m, nil
@@ -2951,6 +3218,287 @@ func (m Model) renderMetaBox() string {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
+	return b.String()
+}
+
+// valueOf returns the raw stored value for a field index.
+func (ms metaState) valueOf(idx int) string {
+	switch idx {
+	case 0:
+		return ms.title
+	case 1:
+		return ms.topic
+	case 2:
+		return ms.tags
+	case 3:
+		return ms.priority
+	case 4:
+		return ms.due
+	case 5:
+		return ms.start
+	case 6:
+		return ms.timezone
+	case 7:
+		return ms.rule
+	case 8:
+		return ms.interval
+	default:
+		return ""
+	}
+}
+
+// renderMetaModalView draws the Create/Edit Task dialog floated over the task
+// list, with list rows still visible above and below.
+func (m Model) renderMetaModalView() string {
+	inner := m.panelInnerWidth()
+
+	listMax := 0
+	if m.height > 0 {
+		listMax = (m.height - 1) - 3 // panel borders (2) + legend (1)
+		if listMax < 1 {
+			listMax = 1
+		}
+	}
+	var bodyLines []string
+	if m.height > 0 {
+		bodyLines = strings.Split(m.renderTaskListWithHeight(listMax), "\n")
+		for len(bodyLines) < listMax {
+			bodyLines = append(bodyLines, "")
+		}
+		if len(bodyLines) > listMax {
+			bodyLines = bodyLines[:listMax]
+		}
+	} else {
+		bodyLines = strings.Split(m.renderTaskList(), "\n")
+	}
+
+	box := m.renderCreateModal()
+	boxLines := strings.Split(box, "\n")
+	boxW := 0
+	for _, l := range boxLines {
+		if w := lipgloss.Width(l); w > boxW {
+			boxW = w
+		}
+	}
+
+	rows := len(bodyLines)
+	top := (rows - len(boxLines)) / 2
+	if top < 0 {
+		top = 0
+	}
+	left := (inner - boxW) / 2
+	if left < 0 {
+		left = 0
+	}
+	for i, bl := range boxLines {
+		r := top + i
+		if r < 0 || r >= rows {
+			continue
+		}
+		w := lipgloss.Width(bl)
+		line := strings.Repeat(" ", left) + bl
+		if pad := inner - left - w; pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		bodyLines[r] = line
+	}
+
+	return m.panel("bada · Tasks", strings.Join(bodyLines, "\n")) + "\n" + m.legendBar()
+}
+
+// renderCreateModal builds the bordered dialog box (title, fields, toggle,
+// validation, hint).
+func (m Model) renderCreateModal() string {
+	title := "Create Task"
+	if m.meta.taskID != 0 {
+		title = "Edit Task"
+	}
+
+	labelW := 9
+	boxInner := 54
+	if max := m.panelInnerWidth() - 6; boxInner > max {
+		boxInner = max
+	}
+	if boxInner < 30 {
+		boxInner = 30
+	}
+	// prefix = "▌ " marker (2) + label column + "  " gap (2)
+	prefix := 2 + labelW + 2
+	valueW := boxInner - prefix - 1
+	if valueW < 8 {
+		valueW = 8
+	}
+
+	now := time.Now()
+	var lines []string
+	for _, f := range m.meta.order() {
+		active := f == m.meta.index
+		if f == fieldMore {
+			lines = append(lines, m.renderModalToggleRow(active))
+			continue
+		}
+		lines = append(lines, m.renderModalFieldRow(f, active, labelW, valueW, now))
+	}
+	lines = append(lines, "")
+	if m.meta.validation != "" {
+		lines = append(lines, m.styles.Warning.Render("⚠ "+m.meta.validation))
+	}
+	lines = append(lines, m.modalHintLine())
+
+	return m.modalFrame(title, lines, boxInner)
+}
+
+func (m Model) renderModalFieldRow(f int, active bool, labelW, valueW int, now time.Time) string {
+	label := metaShortLabel(f)
+	if f == 0 {
+		label += " *" // required
+	}
+	labelStr := fmt.Sprintf("%-*s", labelW, label)
+	if active {
+		labelStr = m.styles.Accent.Render(labelStr)
+	} else {
+		labelStr = m.styles.Heading.Render(labelStr)
+	}
+	m.input.Width = valueW
+
+	var value string
+	switch f {
+	case 3: // priority — stepper
+		value = m.priorityDisplay(active)
+	case 4: // due — date stepper (prefilled today; +/- adjusts, ←/→ pick part)
+		if active {
+			value = m.renderDueStepper(now)
+		} else {
+			value = m.dueDisplay(now)
+		}
+	case 7: // recurrence
+		if active {
+			value = m.input.View()
+		} else {
+			value = recurDisplay(m, m.meta.rule)
+		}
+	default:
+		if active {
+			value = m.input.View()
+		} else {
+			value = orDash(m, m.meta.valueOf(f))
+		}
+	}
+
+	marker := "  "
+	if active {
+		marker = m.styles.Accent.Render("▌ ")
+	}
+	return marker + labelStr + "  " + value
+}
+
+// modalHintLine renders the keys relevant to the current field.
+func (m Model) modalHintLine() string {
+	switch m.meta.index {
+	case 4: // Due stepper
+		return m.styles.Muted.Render("+/-:adjust ←→:part x:clear · tab:next · ⏎:save · esc:cancel")
+	case 3: // Priority stepper
+		return m.styles.Muted.Render("+/-:priority · tab:next · ⏎:save · esc:cancel")
+	default:
+		return m.styles.Muted.Render("tab/↑↓:move · ⏎:save · esc:cancel · ^n/^p:complete")
+	}
+}
+
+func (m Model) renderModalToggleRow(active bool) string {
+	text := "▸ More details"
+	if m.meta.expanded {
+		text = "▾ Fewer details"
+	}
+	marker := "  "
+	if active {
+		marker = m.styles.Accent.Render("▌ ")
+		text = m.styles.Accent.Render(text)
+	} else {
+		text = m.styles.Muted.Render(text)
+	}
+	return marker + text
+}
+
+func (m Model) priorityDisplay(active bool) string {
+	disp := "—"
+	if v := strings.TrimSpace(m.meta.priority); v != "" {
+		disp = "P" + v
+	}
+	if active {
+		return m.styles.Accent.Render("‹ " + disp + " ›")
+	}
+	return disp
+}
+
+// renderDueStepper draws the active Due field as Y-M-D H:M with the selected
+// component highlighted, plus the weekday for orientation.
+func (m Model) renderDueStepper(now time.Time) string {
+	if strings.TrimSpace(m.meta.due) == "" {
+		return m.styles.Muted.Render("—  ") + m.styles.Accent.Render("+/-") + m.styles.Muted.Render(" sets today")
+	}
+	t := m.dueTime(now)
+	parts := []string{t.Format("2006"), t.Format("01"), t.Format("02"), t.Format("15"), t.Format("04")}
+	seps := []string{"-", "-", " ", ":"}
+	var b strings.Builder
+	for i, p := range parts {
+		if i == m.meta.dueComponent {
+			b.WriteString(m.styles.Selection.Render(p))
+		} else {
+			b.WriteString(p)
+		}
+		if i < len(seps) {
+			b.WriteString(seps[i])
+		}
+	}
+	b.WriteString(m.styles.Muted.Render("  " + t.Format("Mon")))
+	return b.String()
+}
+
+// dueDisplay renders the inactive Due value: a resolved date, raw text, or —.
+func (m Model) dueDisplay(now time.Time) string {
+	if strings.TrimSpace(m.meta.due) == "" {
+		return m.styles.Muted.Render("—")
+	}
+	if prev := dueePreview(m.meta.due, now); prev != "" && prev != "invalid" {
+		return prev
+	}
+	return m.meta.due
+}
+
+func recurDisplay(m Model, rule string) string {
+	if strings.TrimSpace(rule) == "" {
+		return m.styles.Muted.Render("off")
+	}
+	return rule
+}
+
+func orDash(m Model, v string) string {
+	if strings.TrimSpace(v) == "" {
+		return m.styles.Muted.Render("—")
+	}
+	return v
+}
+
+// modalFrame wraps body lines in a rounded box with an embedded title, sized to
+// a fixed inner width.
+func (m Model) modalFrame(title string, lines []string, inner int) string {
+	bs := m.styles.Border
+	var b strings.Builder
+	b.WriteString(m.panelTop(title, inner))
+	b.WriteString("\n")
+	left := bs.Render("│")
+	right := bs.Render("│")
+	for _, line := range lines {
+		w := lipgloss.Width(line)
+		if w < inner {
+			line += strings.Repeat(" ", inner-w)
+		} else if w > inner {
+			line = truncateANSI(line, inner)
+		}
+		b.WriteString(left + line + right)
+		b.WriteString("\n")
+	}
+	b.WriteString(bs.Render("╰" + strings.Repeat("─", inner) + "╯"))
 	return b.String()
 }
 
@@ -3592,18 +4140,22 @@ func (m Model) renderStatusBar() string {
 }
 
 func (m Model) fillView(body string) string {
+	statusBar := m.renderStatusBar()
 	if m.height <= 0 {
-		return body + m.renderStatusBar()
+		return body + "\n" + statusBar
 	}
-	lines := countLines(body)
 	target := m.height - 1
-	if target < 0 {
-		target = 0
+	if target < 1 {
+		target = 1
 	}
-	if lines < target {
-		body += strings.Repeat("\n", target-lines)
+	lines := strings.Split(body, "\n")
+	for len(lines) < target {
+		lines = append(lines, "")
 	}
-	return body + m.renderStatusBar()
+	if len(lines) > target {
+		lines = lines[:target]
+	}
+	return strings.Join(lines, "\n") + "\n" + statusBar
 }
 
 func countLines(s string) int {
@@ -3642,6 +4194,12 @@ func (m Model) modeLabel() string {
 		return "NOTE"
 	case modeReport:
 		return "REPORT"
+	case modeHelp:
+		return "HELP"
+	case modeCalendar:
+		return "CALENDAR"
+	case modeGantt:
+		return "GANTT"
 	default:
 		return "?"
 	}
@@ -4606,6 +5164,111 @@ func filterDateTime(v string) string {
 		}
 	}
 	return b.String()
+}
+
+// filterDueInput keeps characters valid for either an explicit date/time
+// (digits, '-', ':', space) or a natural-language phrase (letters, '+').
+func filterDueInput(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			r == '-' || r == '+' || r == ':' || r == ' ' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 24 {
+			break
+		}
+	}
+	return b.String()
+}
+
+// parseRelativeDate resolves natural-language day references like "today",
+// "tomorrow", weekday names, "in 3d", "+2w", "3d" relative to now.
+func parseRelativeDate(token string, now time.Time) (time.Time, bool) {
+	t := strings.ToLower(strings.TrimSpace(token))
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	switch t {
+	case "today", "tod":
+		return today, true
+	case "tomorrow", "tmr", "tom":
+		return today.AddDate(0, 0, 1), true
+	case "yesterday":
+		return today.AddDate(0, 0, -1), true
+	}
+	if wd, ok := parseWeekday(t); ok {
+		delta := (int(wd) - int(today.Weekday()) + 7) % 7
+		if delta == 0 {
+			delta = 7 // "monday" means the next one, not today
+		}
+		return today.AddDate(0, 0, delta), true
+	}
+	// "in 3d", "+3d", "3d", "2w", "in 2 weeks"
+	re := regexp.MustCompile(`(?i)^(?:in\s+|\+)?(\d+)\s*(d|day|days|w|week|weeks)$`)
+	if mm := re.FindStringSubmatch(t); mm != nil {
+		n, err := strconv.Atoi(mm[1])
+		if err == nil {
+			unit := strings.ToLower(mm[2])
+			if strings.HasPrefix(unit, "w") {
+				n *= 7
+			}
+			return today.AddDate(0, 0, n), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// parseDueInput parses the Due field, accepting natural language plus explicit
+// "YYYY-MM-DD" / "YYYY-MM-DD HH:MM". An optional trailing "HH:MM" may follow a
+// relative day (e.g. "tomorrow 14:30").
+func parseDueInput(v string, now time.Time) (sql.NullTime, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return sql.NullTime{}, nil
+	}
+	// Explicit forms first.
+	if t, err := parseDateTime(v); err == nil {
+		return t, nil
+	}
+	// Natural language, with an optional trailing clock time.
+	dayPart := v
+	clock := ""
+	if i := strings.LastIndex(v, " "); i >= 0 {
+		tail := strings.TrimSpace(v[i+1:])
+		if regexp.MustCompile(`^\d{1,2}:\d{2}$`).MatchString(tail) {
+			dayPart = strings.TrimSpace(v[:i])
+			clock = tail
+		}
+	}
+	day, ok := parseRelativeDate(dayPart, now)
+	if !ok {
+		return sql.NullTime{}, fmt.Errorf("expected a date or words like today/tomorrow/in 3d")
+	}
+	if clock != "" {
+		hm, err := time.Parse("15:04", clock)
+		if err == nil {
+			day = time.Date(day.Year(), day.Month(), day.Day(), hm.Hour(), hm.Minute(), 0, 0, day.Location())
+		}
+	}
+	return sql.NullTime{Time: day, Valid: true}, nil
+}
+
+// dueePreview renders a small confirmation of how the Due field will be
+// interpreted, used live in the modal.
+func dueePreview(v string, now time.Time) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	t, err := parseDueInput(v, now)
+	if err != nil {
+		return "invalid"
+	}
+	if !t.Valid {
+		return ""
+	}
+	if t.Time.Hour() == 0 && t.Time.Minute() == 0 {
+		return t.Time.Format("Mon 2006-01-02")
+	}
+	return t.Time.Format("Mon 2006-01-02 15:04")
 }
 
 func filterYN(v string) string {

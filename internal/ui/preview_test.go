@@ -93,8 +93,57 @@ func TestPreviewView(t *testing.T) {
 	fmt.Println("\n========== LIST VIEW (inside 'work', row 2 selected) ==========")
 	fmt.Println(m.View())
 
+	if am, _ := m.startMetadataAdd(); am != nil {
+		add := am.(Model)
+		add.meta.title = "Email the quarterly report"
+		add.input.SetValue(add.meta.title)
+		fmt.Println("\n========== CREATE TASK MODAL (collapsed, Due defaults to today) ==========")
+		fmt.Println(add.View())
+
+		add.meta.expanded = true
+		add.meta.due = "2026-06-20 09:00"
+		add.meta.index = 4 // focus Due (date stepper)
+		add.focusMetaField()
+		add.meta.dueComponent = 2 // day part selected
+		fmt.Println("\n========== CREATE TASK MODAL (Due date stepper, day selected) ==========")
+		fmt.Println(add.View())
+
+		add.meta.index = 3 // Priority stepper
+		add.focusMetaField()
+		fmt.Println("\n========== CREATE TASK MODAL (Priority focused) ==========")
+		fmt.Println(add.View())
+	}
+
+	if mm, _ := m.startMetadataEdit(m.tasks[1]); mm != nil {
+		fmt.Println("\n========== EDIT TASK MODAL ==========")
+		fmt.Println(mm.View())
+	}
+
 	m.refreshReport()
 	m.mode = modeReport
 	fmt.Println("\n========== REPORT VIEW ==========")
+	fmt.Println(m.View())
+
+	m.mode = modeHelp
+	fmt.Println("\n========== HELP VIEW ==========")
+	fmt.Println(m.View())
+
+	m.mode = modeCalendar
+	m.calendarMonth = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	m.calendarDay = now
+	fmt.Println("\n========== CALENDAR VIEW ==========")
+	fmt.Println(m.View())
+
+	m.mode = modeGantt
+	fmt.Println("\n========== GANTT VIEW ==========")
+	fmt.Println(m.View())
+
+	// Seed trash by deleting two tasks, then render the trash view.
+	_ = store.DeleteTask(tasks[0].ID)
+	_ = store.DeleteTask(tasks[2].ID)
+	m.trash, _ = store.ListTrash()
+	m.mode = modeTrash
+	m.trashCursor = 0
+	fmt.Println("\n========== TRASH VIEW ==========")
 	fmt.Println(m.View())
 }
