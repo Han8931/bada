@@ -37,13 +37,20 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 - `:agenda` — reminder report (also opens on launch).
 - `:calendar` — month grid; `h/l` day, `j/k` week, `H/L` month, `Enter` day detail.
 - `:gantt` — timeline of tasks with start/due bars and a "today" marker.
+- `:stats` — productivity dashboard: counts, completions (today/week/month),
+  current & longest streaks, a 7-day completion chart, and pending breakdowns by
+  priority and topic.
 - `:help` (or `?`) — full keybinding reference.
 - `:config` — update config and DB paths.
 
 
 ## Daily Use
 
-- Rename: `r` (shows current/new), `Enter` saves, `Esc` cancels.
+- Toggle done: `r` (rotate the task's state).
+- Delete to trash: `D` (`X` deletes all done).
+- Edit / rename: `e` opens the metadata editor (Title field renames a task; on a
+  topic row it renames the topic). The current task's fields show in the
+  **`bada · Detail`** pane below the list.
 - Priority: `+` / `-` (max 10).
 - Due shift: `]` / `[` (+1d/-1d).
 - Sort: `s` then `d/p/t/a/s` (due/priority/created/auto/state).
