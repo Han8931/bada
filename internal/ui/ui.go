@@ -644,10 +644,15 @@ func (m Model) View() string {
 		hints = m.hintBar(m.listHints())
 	}
 
+	// overhead reserves rows for the legend, the bottom Detail pane, its key
+	// hints, the two panel borders, and a blank separator line so the Detail
+	// pane sits detached at the bottom of the screen rather than stuck right
+	// beneath the task list.
 	overhead := 2 + countLines(legend) + countLines(footer) // 2 = panel borders
 	if showHints {
 		overhead += countLines(hints)
 	}
+	overhead++ // blank separator between the list and the bottom Detail pane
 
 	listMax := 0
 	if m.height > 0 {
@@ -664,16 +669,32 @@ func (m Model) View() string {
 		body = m.renderTaskList()
 	}
 
-	b.WriteString(m.panel("bada · Tasks", body))
-	b.WriteString("\n")
-	b.WriteString(legend)
-	b.WriteString("\n")
-	b.WriteString(footer)
+	// Top block: the task list and its status-dot legend.
+	top := m.panel("bada · Tasks", body) + "\n" + legend
+	// Bottom block: the Detail pane (and key hints), pinned to the screen bottom.
+	bottom := footer
 	if showHints {
-		b.WriteString("\n")
-		b.WriteString(hints)
+		bottom += "\n" + hints
 	}
-	return m.fillView(b.String())
+
+	if m.height <= 0 {
+		return m.fillView(top + "\n" + bottom)
+	}
+
+	// Push the bottom block down so the Detail pane floats at the bottom of the
+	// screen, separated from the list by blank space instead of being attached.
+	topLines := strings.Split(top, "\n")
+	bottomLines := strings.Split(bottom, "\n")
+	gap := (m.height - 1) - len(topLines) - len(bottomLines)
+	if gap < 0 {
+		gap = 0
+	}
+	lines := topLines
+	for i := 0; i < gap; i++ {
+		lines = append(lines, "")
+	}
+	lines = append(lines, bottomLines...)
+	return m.fillView(strings.Join(lines, "\n"))
 }
 
 // listHints returns the key-hint chips shown beneath the task list.
