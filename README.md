@@ -18,17 +18,16 @@ bada uses a framed, "taskdog-inspired" terminal UI:
 - **Framed panels** — every screen is drawn in a rounded, titled panel
   (`bada · Tasks`, `bada · Calendar`, `bada · Gantt`, `bada · Trash`,
   `bada · Help`).
-- **Task table** — columns for state, title, priority (`Pn`), due, and tags,
-  under a colored header bar. Overdue (`[+Nd]`) and recurring (`[recur …]`)
-  badges appear inline.
+- **Task table** — columns for status, title, assignee, priority (`Pn`), due,
+  and topic, under a colored header bar. Recurring (`[recur …]`) badges appear inline.
 - **Full-width selection bar** highlights the current row; done tasks are
   struck through, multi-selected tasks are tinted.
-- **Status-dot legend** (`● pending  ● done  ● overdue  ● topic`) and a
+- **Status-dot legend** (`●  ●  ●  ●`) and a
   **key-hint footer** showing the active shortcuts.
 - **Full-width status bar** with the current mode, sort, search, and position.
 
-Tasks are grouped under topics at the root; press `Enter`/`l` to drill into a
-topic and `h` to go back. `RecentlyAdded` / `RecentlyDone` are virtual topics.
+Tasks are listed directly; each task's topic appears in the table so the list
+stays flat and scan-friendly.
 
 ### Views
 
@@ -46,17 +45,16 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 
 ## Daily Use
 
-- Toggle done: `r` (rotate the task's state).
+- Status: `r` rotates `PENDING` → `IN-PROGRESS` → `DONE`.
 - Delete to trash: `D` (`X` deletes all done).
-- Edit / rename: `e` opens the metadata editor (Title field renames a task; on a
-  topic row it renames the topic). The current task's fields show in the
+- Edit / rename: `e` opens the metadata editor. The current task's fields show in the
   **`bada · Detail`** pane below the list.
 - Priority: `+` / `-` (max 10).
 - Due shift: `]` / `[` (+1d/-1d).
 - Sort: `s` then `d/p/t/a/s` (due/priority/created/auto/state).
 - `gg` / `G` bindings (jump to top / bottom)
 - Search: `/` opens a query prompt; `Enter` applies, `Esc` cancels (submit empty to clear).
-- Notes: `Enter` to preview notes, `e` to edit notes inside the preview (works for tasks or topic rows; not available for RecentlyAdded/RecentlyDone).
+- Notes: `Enter` to preview notes, `e` to edit notes inside the preview.
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 - Help: `?` (or `:help`) opens the full keybinding reference.
 - Other views: `:calendar` (month grid) and `:gantt` (timeline).
@@ -178,9 +176,9 @@ I have polished your existing list for clarity and professional terminology, the
 # Jira 
 
 - Two-way sync modes: read-only (safe) vs. bidirectional (opt-in), with a clear "source of truth" toggle.
-- Task mapping: Jira Issue → Bada Task fields (summary, status, priority, due, labels, assignee).
+- Task mapping: Jira Issue → Bada Task fields (summary, status, priority, due, labels, assignee, reporter).
 - Filters: sync by JQL (e.g., "assigned to me AND status != Done"), per-project toggles.
-- Status actions: mark Bada task done → transition Jira issue (configurable transition).
+- Status actions: Bada status changes → Jira transitions (configurable mapping).
 - Comment/notes bridge: append Bada notes to Jira comments (or vice versa), with opt-in prefixes.
 - Offline queue: local actions stored and pushed when online; show "pending sync" badge.
 - Daily view: "Today" panel showing Jira due/overdue issues alongside local tasks.

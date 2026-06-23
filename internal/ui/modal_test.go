@@ -330,7 +330,7 @@ func TestDetailsToggle(t *testing.T) {
 	if !m.meta.expanded {
 		t.Fatalf("expected details expanded after enter on toggle")
 	}
-	if got := len(m.meta.order()); got != 11 { // 4 core + toggle + 6 detail
-		t.Fatalf("expanded order = %d rows, want 11", got)
+	if got := len(m.meta.order()); got != 14 { // 4 core + toggle + 9 detail
+		t.Fatalf("expanded order = %d rows, want 14", got)
 	}
 }

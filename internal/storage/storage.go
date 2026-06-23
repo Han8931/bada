@@ -18,12 +18,16 @@ import (
 type Task struct {
 	ID                 int
 	Title              string
+	Status             string
 	Done               bool
 	Topics             []string
 	Timezone           string
 	Tags               string
+	Assignee           string
+	Reporter           string
 	Due                sql.NullTime
 	Start              sql.NullTime
+	End                sql.NullTime
 	Priority           int
 	Recurring          bool
 	RecurrenceRule     string
@@ -46,6 +50,10 @@ type TrashEntry struct {
 
 type rowScanner interface {
 	Scan(dest ...any) error
+}
+
+func taskSelectSQL(suffix string) string {
+	return `SELECT id, title, done, status, tags, assignee, reporter, due, start_at, end_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ` + suffix
 }
 
 func Open(dbPath, trashDir string) (*Store, error) {
@@ -93,9 +101,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	title TEXT NOT NULL,
 	done INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL DEFAULT 'PENDING',
 	tags TEXT DEFAULT '',
+	assignee TEXT DEFAULT '',
+	reporter TEXT DEFAULT '',
 	due TEXT DEFAULT NULL,
 	start_at TEXT DEFAULT NULL,
+	end_at TEXT DEFAULT NULL,
 	timezone TEXT DEFAULT '',
 	priority INTEGER NOT NULL DEFAULT 0,
 	recurring INTEGER NOT NULL DEFAULT 0,
@@ -128,7 +140,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 func (s *Store) ensureTaskColumns() error {
 	required := map[string]string{
 		"timezone":            "ALTER TABLE tasks ADD COLUMN timezone TEXT DEFAULT '';",
+		"status":              "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'PENDING';",
+		"assignee":            "ALTER TABLE tasks ADD COLUMN assignee TEXT DEFAULT '';",
+		"reporter":            "ALTER TABLE tasks ADD COLUMN reporter TEXT DEFAULT '';",
 		"start_at":            "ALTER TABLE tasks ADD COLUMN start_at TEXT DEFAULT NULL;",
+		"end_at":              "ALTER TABLE tasks ADD COLUMN end_at TEXT DEFAULT NULL;",
 		"priority":            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
 		"recurring":           "ALTER TABLE tasks ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0;",
 		"recurrence_rule":     "ALTER TABLE tasks ADD COLUMN recurrence_rule TEXT DEFAULT '';",
@@ -159,6 +175,9 @@ func (s *Store) ensureTaskColumns() error {
 		if _, err := s.db.Exec(alter); err != nil {
 			return err
 		}
+	}
+	if _, err := s.db.Exec(`UPDATE tasks SET status = 'DONE' WHERE done = 1 AND (status = '' OR status = 'PENDING');`); err != nil {
+		return err
 	}
 	return rows.Err()
 }
@@ -242,7 +261,7 @@ func (s *Store) ensureTopicNoteColumns() error {
 }
 
 func (s *Store) FetchTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ORDER BY id;`)
+	rows, err := s.db.Query(taskSelectSQL(`ORDER BY id;`))
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +288,7 @@ func (s *Store) FetchTasks() ([]Task, error) {
 
 func (s *Store) AddTask(title string) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.Exec(`INSERT INTO tasks (title, done, created_at) VALUES (?, 0, ?);`, title, now)
+	res, err := s.db.Exec(`INSERT INTO tasks (title, done, status, created_at) VALUES (?, 0, 'PENDING', ?);`, title, now)
 	if err != nil {
 		return 0, err
 	}
@@ -282,12 +301,25 @@ func (s *Store) AddTask(title string) (int, error) {
 
 func (s *Store) SetDone(id int, done bool) error {
 	val := 0
+	status := "PENDING"
 	completed := sql.NullString{}
 	if done {
 		val = 1
+		status = "DONE"
 		completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
 	}
-	_, err := s.db.Exec(`UPDATE tasks SET done = ?, completed_at = ? WHERE id = ?;`, val, completed, id)
+	_, err := s.db.Exec(`UPDATE tasks SET done = ?, status = ?, completed_at = ? WHERE id = ?;`, val, status, completed, id)
+	return err
+}
+
+func (s *Store) SetStatus(id int, status string) error {
+	status = normalizeTaskStatus(status, false)
+	done := status == "DONE"
+	completed := sql.NullString{}
+	if done {
+		completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := s.db.Exec(`UPDATE tasks SET status = ?, done = ?, completed_at = ? WHERE id = ?;`, status, boolToInt(done), completed, id)
 	return err
 }
 
@@ -400,7 +432,7 @@ func (s *Store) ShiftDue(id int, days int) error {
 	return err
 }
 
-func (s *Store) UpdateTaskMetadata(id int, topic, tags, timezone string, priority int, due, start sql.NullTime, recurring bool) error {
+func (s *Store) UpdateTaskMetadata(id int, topic, tags, assignee, reporter, timezone string, priority int, due, start, end sql.NullTime, recurring bool) error {
 	dueStr := sql.NullString{}
 	if due.Valid {
 		dueStr = sql.NullString{String: due.Time.UTC().Format(time.RFC3339), Valid: true}
@@ -408,6 +440,10 @@ func (s *Store) UpdateTaskMetadata(id int, topic, tags, timezone string, priorit
 	startStr := sql.NullString{}
 	if start.Valid {
 		startStr = sql.NullString{String: start.Time.UTC().Format(time.RFC3339), Valid: true}
+	}
+	endStr := sql.NullString{}
+	if end.Valid {
+		endStr = sql.NullString{String: end.Time.UTC().Format(time.RFC3339), Valid: true}
 	}
 	rec := 0
 	if recurring {
@@ -418,8 +454,8 @@ func (s *Store) UpdateTaskMetadata(id int, topic, tags, timezone string, priorit
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`UPDATE tasks SET tags = ?, timezone = ?, priority = ?, due = ?, start_at = ?, recurring = ? WHERE id = ?;`,
-		tags, timezone, priority, dueStr, startStr, rec, id)
+	_, err = tx.Exec(`UPDATE tasks SET tags = ?, assignee = ?, reporter = ?, timezone = ?, priority = ?, due = ?, start_at = ?, end_at = ?, recurring = ? WHERE id = ?;`,
+		tags, assignee, reporter, timezone, priority, dueStr, startStr, endStr, rec, id)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -525,8 +561,9 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 	}
 	for _, e := range entries {
 		task := e.Task
-		res, err := tx.Exec(`INSERT INTO tasks (title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			task.Title, boolToInt(task.Done), task.Tags, nullTimeToString(task.Due), nullTimeToString(task.Start), task.Timezone, task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
+		status := normalizeTaskStatus(task.Status, task.Done)
+		res, err := tx.Exec(`INSERT INTO tasks (title, done, status, tags, assignee, reporter, due, start_at, end_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			task.Title, boolToInt(status == "DONE"), status, task.Tags, task.Assignee, task.Reporter, nullTimeToString(task.Due), nullTimeToString(task.Start), nullTimeToString(task.End), task.Timezone, task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -564,7 +601,7 @@ func (s *Store) PurgeTrash(entries []TrashEntry) error {
 }
 
 func (s *Store) fetchTaskByID(id int) (Task, error) {
-	row := s.db.QueryRow(`SELECT id, title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE id = ?;`, id)
+	row := s.db.QueryRow(taskSelectSQL(`WHERE id = ?;`), id)
 	task, err := scanTask(row)
 	if err != nil {
 		return Task{}, err
@@ -578,7 +615,7 @@ func (s *Store) fetchTaskByID(id int) (Task, error) {
 }
 
 func (s *Store) fetchDoneTasks() ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id, title, done, tags, due, start_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks WHERE done = 1 ORDER BY id;`)
+	rows, err := s.db.Query(taskSelectSQL(`WHERE done = 1 ORDER BY id;`))
 	if err != nil {
 		return nil, err
 	}
@@ -604,7 +641,7 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 }
 
 func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.tags, tasks.due, tasks.start_at, tasks.timezone, tasks.priority,
+	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.status, tasks.tags, tasks.assignee, tasks.reporter, tasks.due, tasks.start_at, tasks.end_at, tasks.timezone, tasks.priority,
 tasks.recurring, tasks.recurrence_rule, tasks.recurrence_interval, tasks.notes, tasks.created_at, tasks.completed_at
 FROM tasks
 INNER JOIN task_topics ON tasks.id = task_topics.task_id
@@ -780,14 +817,15 @@ func scanTask(scanner rowScanner) (Task, error) {
 	var doneInt, priority, recurring int
 	var rule sql.NullString
 	var interval int
-	var notes sql.NullString
-	var dueStr, startStr, completedStr sql.NullString
+	var status, notes, assignee, reporter sql.NullString
+	var dueStr, startStr, endStr, completedStr sql.NullString
 	var createdStr string
 
-	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &t.Tags, &dueStr, &startStr, &t.Timezone, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &status, &t.Tags, &assignee, &reporter, &dueStr, &startStr, &endStr, &t.Timezone, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
 		return Task{}, err
 	}
 	t.Done = doneInt == 1
+	t.Status = normalizeTaskStatus(status.String, t.Done)
 	t.Priority = priority
 	t.Recurring = recurring == 1
 	if rule.Valid {
@@ -796,6 +834,12 @@ func scanTask(scanner rowScanner) (Task, error) {
 	t.RecurrenceInterval = interval
 	if notes.Valid {
 		t.Notes = notes.String
+	}
+	if assignee.Valid {
+		t.Assignee = assignee.String
+	}
+	if reporter.Valid {
+		t.Reporter = reporter.String
 	}
 	if dueStr.Valid {
 		parsed := parseTimeWithFallback(dueStr.String)
@@ -809,6 +853,12 @@ func scanTask(scanner rowScanner) (Task, error) {
 			t.Start = sql.NullTime{Time: parsed, Valid: true}
 		}
 	}
+	if endStr.Valid {
+		parsed := parseTimeWithFallback(endStr.String)
+		if !parsed.IsZero() {
+			t.End = sql.NullTime{Time: parsed, Valid: true}
+		}
+	}
 	if created, err := time.Parse(time.RFC3339, createdStr); err == nil {
 		t.CreatedAt = created
 	}
@@ -819,6 +869,24 @@ func scanTask(scanner rowScanner) (Task, error) {
 		}
 	}
 	return t, nil
+}
+
+func normalizeTaskStatus(status string, done bool) string {
+	status = strings.ToUpper(strings.TrimSpace(status))
+	status = strings.ReplaceAll(status, "_", "-")
+	switch status {
+	case "DONE":
+		return "DONE"
+	case "IN-PROGRESS":
+		return "IN-PROGRESS"
+	case "PENDING":
+		return "PENDING"
+	default:
+		if done {
+			return "DONE"
+		}
+		return "PENDING"
+	}
 }
 
 func (s *Store) renameTopicNote(oldName, newName string) error {

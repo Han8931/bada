@@ -50,7 +50,7 @@ func TestPreviewView(t *testing.T) {
 		if !s.due.IsZero() {
 			due = sql.NullTime{Time: s.due, Valid: true}
 		}
-		_ = store.UpdateTaskMetadata(id, s.topic, "", "", s.pri, due, sql.NullTime{}, false)
+		_ = store.UpdateTaskMetadata(id, s.topic, "", "", "", "", s.pri, due, sql.NullTime{}, sql.NullTime{}, false)
 		if s.done {
 			_ = store.SetDone(id, true)
 		}

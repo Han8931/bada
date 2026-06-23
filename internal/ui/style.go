@@ -72,14 +72,14 @@ func (m Model) panelTop(title string, inner int) string {
 	return bs.Render("╭─ ") + label + bs.Render(" "+strings.Repeat("─", midDashes)+"╮")
 }
 
-// legendBar renders the colored status-dot legend shown beneath the task list.
+// legendBar renders compact status dots beneath the task list.
 func (m Model) legendBar() string {
 	sep := m.styles.Muted.Render("   ")
 	parts := []string{
-		m.styles.Warning.Render("●") + m.styles.Muted.Render(" pending"),
-		m.styles.Success.Render("●") + m.styles.Muted.Render(" done"),
-		m.styles.Danger.Render("●") + m.styles.Muted.Render(" overdue"),
-		m.styles.Accent.Render("●") + m.styles.Muted.Render(" topic"),
+		m.styles.Warning.Render("●"),
+		m.styles.Success.Render("●"),
+		m.styles.Danger.Render("●"),
+		m.styles.Accent.Render("●"),
 	}
 	return " " + strings.Join(parts, sep)
 }

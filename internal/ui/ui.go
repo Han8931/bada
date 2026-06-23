@@ -97,9 +97,12 @@ type metaState struct {
 	title         string
 	topic         string
 	tags          string
+	assignee      string
+	reporter      string
 	priority      string
 	due           string
 	start         string
+	end           string
 	timezone      string
 	rule          string
 	interval      string
@@ -124,8 +127,8 @@ const fieldMore = -1
 func metaCoreFields() []int { return []int{0, 1, 3, 4} }
 
 // metaDetailFields are revealed when the modal is expanded:
-// Tags, Start, Timezone, Recurrence, Interval, Notes.
-func metaDetailFields() []int { return []int{2, 5, 6, 7, 8, 9} }
+// Tags, Assignee, Reporter, Start, End, Timezone, Recurrence, Interval, Notes.
+func metaDetailFields() []int { return []int{2, 5, 6, 7, 8, 9, 10, 11, 12} }
 
 // order returns the navigable rows in the modal, in display order. The
 // expand/collapse toggle (fieldMore) always sits between the core fields and
@@ -163,14 +166,20 @@ func metaShortLabel(idx int) string {
 	case 4:
 		return "Due"
 	case 5:
-		return "Start"
+		return "Assignee"
 	case 6:
-		return "Timezone"
+		return "Reporter"
 	case 7:
-		return "Recurs"
+		return "Start"
 	case 8:
-		return "Interval"
+		return "End"
 	case 9:
+		return "Timezone"
+	case 10:
+		return "Recurs"
+	case 11:
+		return "Interval"
+	case 12:
 		return "Notes"
 	default:
 		return ""
@@ -429,9 +438,10 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		err := m.store.SetDone(task.ID, !task.Done)
+		nextStatus := nextTaskStatus(task)
+		err := m.store.SetStatus(task.ID, nextStatus)
 		if err != nil {
-			m.status = fmt.Sprintf("toggle failed: %v", err)
+			m.status = fmt.Sprintf("status failed: %v", err)
 			return m, nil
 		}
 		m.tasks, err = m.store.FetchTasks()
@@ -439,7 +449,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			m.sortTasks()
 			vis = m.visibleItems()
 			m.cursor = clampCursor(m.cursor, len(vis))
-			m.status = "Toggled task"
+			m.status = "Status: " + nextStatus
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", err)
 		}
@@ -451,27 +461,15 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		}
 	case m.cfg.Keys.Delete:
 		if selected := m.selectedTaskList(); len(selected) > 0 {
-			m.confirmDel = true
-			m.pendingBatch = selected
-			m.status = fmt.Sprintf("Delete %d selected task(s)? y/n", len(selected))
+			m = m.deleteTasksToTrash(selected)
+			m.selectedTasks = map[int]bool{}
 			return m, nil
 		}
 		task, ok := m.currentTask()
 		if !ok {
-			vis := m.visibleItems()
-			if len(vis) > 0 && m.cursor < len(vis) {
-				it := vis[m.cursor]
-				if it.kind == itemTopic && m.currentTopic == "" && !isSpecialTopic(it.topic) {
-					m.confirmTopic = true
-					m.pendingTopic = it.topic
-					m.status = fmt.Sprintf("Delete topic \"%s\" and remove it from tasks? y/n", it.topic)
-				}
-			}
 			return m, nil
 		}
-		m.confirmDel = true
-		m.pendingDel = &task
-		m.status = fmt.Sprintf("Delete \"%s\"? y/n", task.Title)
+		m = m.deleteTasksToTrash([]storage.Task{task})
 	case m.cfg.Keys.DeleteAllDone:
 		m.confirmDel = true
 		m.pendingDel = nil
@@ -510,12 +508,18 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			m.status = "No task selected"
 			return m, nil
 		}
-		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, humanDone(task.Done))
+		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, taskStatusLabel(task))
 		if len(task.Topics) > 0 {
 			info += " • topics:" + strings.Join(task.Topics, ",")
 		}
 		if strings.TrimSpace(task.Tags) != "" {
 			info += " • tags:" + task.Tags
+		}
+		if strings.TrimSpace(task.Assignee) != "" {
+			info += " • assignee:" + task.Assignee
+		}
+		if strings.TrimSpace(task.Reporter) != "" {
+			info += " • reporter:" + task.Reporter
 		}
 		if task.Priority != 0 {
 			info += fmt.Sprintf(" • priority:%d", task.Priority)
@@ -526,16 +530,14 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		if task.Start.Valid {
 			info += " • start:" + task.Start.Time.Format("2006-01-02")
 		}
+		if task.End.Valid {
+			info += " • end:" + formatDateTime(task.End)
+		}
 		if recSummary := recurrenceSummary(task); recSummary != "" {
 			info += " • recur:" + recSummary
 		}
 		m.status = info
 	case m.cfg.Keys.Edit:
-		// Edit also renames topics: on a root topic row it opens the topic rename.
-		vis := m.visibleItems()
-		if m.cursor < len(vis) && vis[m.cursor].kind == itemTopic && m.currentTopic == "" && !isSpecialTopic(vis[m.cursor].topic) {
-			return m.startRenameTopic(vis[m.cursor].topic)
-		}
 		task, ok := m.currentTask()
 		if !ok {
 			m.status = "No tasks to edit"
@@ -636,7 +638,6 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
-	legend := m.legendBar()
 	footer := strings.TrimRight(m.renderFooterPanel(), "\n")
 	showHints := m.mode == modeList && m.meta == nil
 	hints := ""
@@ -644,33 +645,6 @@ func (m Model) View() string {
 		hints = m.hintBar(m.listHints())
 	}
 
-	// overhead reserves rows for the legend, the bottom Detail pane, its key
-	// hints, the two panel borders, and a blank separator line so the Detail
-	// pane sits detached at the bottom of the screen rather than stuck right
-	// beneath the task list.
-	overhead := 2 + countLines(legend) + countLines(footer) // 2 = panel borders
-	if showHints {
-		overhead += countLines(hints)
-	}
-	overhead++ // blank separator between the list and the bottom Detail pane
-
-	listMax := 0
-	if m.height > 0 {
-		listMax = (m.height - 1) - overhead
-		if listMax < 1 {
-			listMax = 1
-		}
-	}
-
-	var body string
-	if m.height > 0 {
-		body = m.renderTaskListWithHeight(listMax)
-	} else {
-		body = m.renderTaskList()
-	}
-
-	// Top block: the task list and its status-dot legend.
-	top := m.panel("bada · Tasks", body) + "\n" + legend
 	// Bottom block: the Detail pane (and key hints), pinned to the screen bottom.
 	bottom := footer
 	if showHints {
@@ -678,21 +652,20 @@ func (m Model) View() string {
 	}
 
 	if m.height <= 0 {
+		top := m.panel("bada · Tasks", m.renderTaskPaneBody(-1))
 		return m.fillView(top + "\n" + bottom)
 	}
 
-	// Push the bottom block down so the Detail pane floats at the bottom of the
-	// screen, separated from the list by blank space instead of being attached.
-	topLines := strings.Split(top, "\n")
+	// Make the Tasks panel the large upper box and leave only a single separator
+	// before the bottom Detail pane.
 	bottomLines := strings.Split(bottom, "\n")
-	gap := (m.height - 1) - len(topLines) - len(bottomLines)
-	if gap < 0 {
-		gap = 0
+	bodyLines := (m.height - 1) - len(bottomLines) - 1 - 2 // separator + panel borders
+	if bodyLines < 1 {
+		bodyLines = 1
 	}
-	lines := topLines
-	for i := 0; i < gap; i++ {
-		lines = append(lines, "")
-	}
+	top := m.panel("bada · Tasks", m.renderTaskPaneBody(bodyLines))
+	lines := strings.Split(top, "\n")
+	lines = append(lines, "")
 	lines = append(lines, bottomLines...)
 	return m.fillView(strings.Join(lines, "\n"))
 }
@@ -858,6 +831,34 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) deleteTasksToTrash(tasks []storage.Task) Model {
+	if len(tasks) == 0 {
+		return m
+	}
+	deleted := 0
+	for _, task := range tasks {
+		if err := m.store.DeleteTask(task.ID); err != nil {
+			m.status = fmt.Sprintf("delete failed: %v", err)
+			return m
+		}
+		deleted++
+	}
+	var err error
+	m.tasks, err = m.store.FetchTasks()
+	if err != nil {
+		m.status = fmt.Sprintf("reload failed: %v", err)
+		return m
+	}
+	m.sortTasks()
+	m.cursor = clampCursor(m.cursor, len(m.visibleItems()))
+	if deleted == 1 {
+		m.status = "Deleted task (moved to trash)"
+	} else {
+		m.status = fmt.Sprintf("Deleted %d task(s) (moved to trash)", deleted)
+	}
+	return m
 }
 
 func (m Model) updateDeleteTopicConfirm(key string) (tea.Model, tea.Cmd) {
@@ -1495,7 +1496,7 @@ func (m Model) tasksForDay(day time.Time) []storage.Task {
 	dayKey := dateKey(day, m.calendarDay.Location())
 	var list []storage.Task
 	for _, t := range m.tasks {
-		if t.Done {
+		if isDone(t) {
 			continue
 		}
 		if t.Due.Valid && dateKey(t.Due.Time, m.calendarDay.Location()) == dayKey {
@@ -1697,18 +1698,18 @@ List Navigation:
 
 Tasks:
   %s     Add task (Create Task dialog)
-  %s     Toggle done
-  %s     Delete (purge to trash)
-  %s     Edit metadata (rename topic on a topic row)
+  %s     Rotate status
+  %s     Delete (move to trash)
+  %s     Edit metadata
   %s     Notes
   space  Select task (multi-select)
-  %s     Delete selected (with confirm)
+  %s     Delete selected
   %s     Delete all done (with confirm)
 
 Create/Edit Task:
   up/down or tab/shift+tab  Move fields
   enter / ^s               Save · esc  Cancel
-  ▸ More details           Tags, Start, Timezone, Recurrence, Notes
+  ▸ More details           Tags, Assignee, Reporter, Start, End, Recurrence, Notes
   Due                      type digits or +/- to set the
                            selected part, ←/→ pick Y/M/D/H/min,
                            x clears it (no due date)
@@ -1780,7 +1781,7 @@ func (m Model) statsContent() string {
 	loc := now.Location()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	tomorrow := today.Add(24 * time.Hour)
-	weekStart := today.AddDate(0, 0, -6)  // last 7 days, inclusive
+	weekStart := today.AddDate(0, 0, -6)   // last 7 days, inclusive
 	monthStart := today.AddDate(0, 0, -29) // last 30 days, inclusive
 
 	var total, done, pending, overdue, dueToday, recurring int
@@ -1791,10 +1792,10 @@ func (m Model) statsContent() string {
 
 	for _, t := range m.tasks {
 		total++
-		if isRecurringTask(t) && !t.Done {
+		if isRecurringTask(t) && isActive(t) {
 			recurring++
 		}
-		if t.Done {
+		if isDone(t) {
 			done++
 		} else {
 			pending++
@@ -2273,7 +2274,7 @@ func (m Model) ganttDataRowsWithHeader() ([]string, string) {
 	}
 	items := make([]ganttItem, 0)
 	for _, t := range m.tasks {
-		if t.Done || !t.Due.Valid {
+		if isDone(t) || !t.Due.Valid {
 			continue
 		}
 		start := t.CreatedAt
@@ -2429,16 +2430,42 @@ func (m Model) renderTaskList() string {
 	return m.renderTaskListWithHeight(-1)
 }
 
+func (m Model) renderTaskPaneBody(maxLines int) string {
+	legend := m.legendBar()
+	if maxLines <= 0 {
+		return m.renderTaskList() + "\n" + legend
+	}
+
+	legendLines := countLines(legend)
+	listMax := maxLines - legendLines
+	if listMax < 1 {
+		return m.renderTaskListWithHeight(maxLines)
+	}
+
+	lines := strings.Split(m.renderTaskListWithHeight(listMax), "\n")
+	for len(lines) < listMax {
+		lines = append(lines, "")
+	}
+	lines = append(lines, strings.Split(legend, "\n")...)
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Model) renderTaskListWithHeight(maxLines int) string {
 	items := m.visibleItems()
 	inner := m.panelInnerWidth()
 
-	titleW := inner - 32
+	statusW := 11
+	assigneeW := 10
+	topicW := 12
+	titleW := inner - 65
 	if titleW < 10 {
 		titleW = 10
 	}
-	if titleW > 52 {
-		titleW = 52
+	if titleW > 42 {
+		titleW = 42
 	}
 
 	full := func(style lipgloss.Style, s string) string {
@@ -2450,7 +2477,7 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 		search := fmt.Sprintf(" Search: %q (%d result(s))", m.searchQuery, len(items))
 		lines = append(lines, full(m.styles.Accent, search))
 	}
-	header := fmt.Sprintf("  %-2s %-*s %-4s %-16s  %s", "St", titleW, "Title", "Pri", "Due", "Tags")
+	header := fmt.Sprintf("  %-*s %-*s %-*s %-4s %-16s  %-*s", statusW, "Status", titleW, "Title", assigneeW, "Assignee", "Pri", "Due", topicW, "Topic")
 	lines = append(lines, full(m.styles.TableHeader, header))
 
 	itemLines := make([]string, 0, len(items))
@@ -2460,10 +2487,10 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 		case itemTopic:
 			line := ""
 			if isSpecialTopic(it.topic) {
-				line = fmt.Sprintf("  %-2s %s", "📁", it.topic)
+				line = fmt.Sprintf("  %-*s %s", statusW, "TOPIC", it.topic)
 			} else {
 				stat := m.topicStats()[it.topic]
-				line = fmt.Sprintf("  %-2s %s (%d/%d)", "📁", it.topic, stat.overdue, stat.total)
+				line = fmt.Sprintf("  %-*s %s (%d/%d)", statusW, "TOPIC", it.topic, stat.overdue, stat.total)
 			}
 			switch {
 			case selected:
@@ -2476,42 +2503,31 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 			itemLines = append(itemLines, line)
 		case itemTask:
 			title := truncateText(it.task.Title, titleW)
-			state := humanDone(it.task.Done)
+			status := taskStatusLabel(it.task)
+			assignee := truncateText(emptyDash(it.task.Assignee), assigneeW)
+			topic := truncateText(topicListLabel(it.task.Topics), topicW)
 			due := displayDate(it.task.Due)
 			if due == "" {
 				due = "pending"
 			}
 			pri := fmt.Sprintf("P%d", it.task.Priority)
-			body := fmt.Sprintf("  %-2s %-*s %-4s %-16s", state, titleW, title, pri, due)
+			body := fmt.Sprintf("  %-*s %-*s %-*s %-4s %-16s  %-*s", statusW, status, titleW, title, assigneeW, assignee, pri, due, topicW, topic)
 
-			badge := overdueBadge(it.task)
 			recBadge := recurrenceBadge(it.task)
 			if selected {
-				if badge != "" {
-					body += "  " + badge
-				}
 				if recBadge != "" {
 					body += "  " + recBadge
-				}
-				if m.searchActive() && len(it.task.Topics) > 0 {
-					body += "  [" + strings.Join(it.task.Topics, ",") + "]"
 				}
 				itemLines = append(itemLines, full(m.styles.Selection, body))
 				continue
 			}
-			if badge != "" {
-				body += "  " + m.styles.Danger.Render(badge)
-			}
 			if recBadge != "" {
 				body += "  " + m.styles.Warning.Render(recBadge)
-			}
-			if m.searchActive() && len(it.task.Topics) > 0 {
-				body += "  " + m.styles.Muted.Render("["+strings.Join(it.task.Topics, ",")+"]")
 			}
 			switch {
 			case m.isTaskSelected(it.task.ID):
 				body = full(m.styles.Warning, body)
-			case it.task.Done:
+			case isDone(it.task):
 				body = full(m.styles.Done, body)
 			default:
 				body = full(lipgloss.NewStyle(), body)
@@ -2842,9 +2858,12 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 		title:     t.Title,
 		topic:     strings.Join(t.Topics, ","),
 		tags:      t.Tags,
+		assignee:  t.Assignee,
+		reporter:  t.Reporter,
 		priority:  fmt.Sprintf("%d", t.Priority),
 		due:       formatDateTime(t.Due),
 		start:     defaultStart(t),
+		end:       formatDateTime(t.End),
 		timezone:  defaultTimezone(t.Timezone),
 		rule:      t.RecurrenceRule,
 		interval:  intervalString(t.RecurrenceInterval),
@@ -2872,9 +2891,12 @@ func (m Model) startMetadataAdd() (tea.Model, tea.Cmd) {
 		title:     "",
 		topic:     defaultTopic,
 		tags:      "",
+		assignee:  "",
+		reporter:  "",
 		priority:  "",
 		due:       today.Format("2006-01-02 15:04"), // default to today; x clears
 		start:     "",
+		end:       "",
 		timezone:  defaultTimezone(""),
 		rule:      "",
 		interval:  "",
@@ -2955,7 +2977,7 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 	}
 	onMore := m.meta.index == fieldMore
 	onPriority := m.meta.index == 3
-	onRecurrence := m.meta.index == 7
+	onRecurrence := m.meta.index == 10
 	onDue := m.meta.index == 4
 
 	switch key {
@@ -3101,7 +3123,8 @@ func (m Model) saveMeta() (tea.Model, tea.Cmd) {
 	// committing; keep the modal open so the user can fix them.
 	if strings.HasPrefix(m.status, "due date invalid") ||
 		strings.HasPrefix(m.status, "priority invalid") ||
-		strings.HasPrefix(m.status, "start date invalid") {
+		strings.HasPrefix(m.status, "start date invalid") ||
+		strings.HasPrefix(m.status, "end date invalid") {
 		m.meta.validation = m.status
 		return m, nil
 	}
@@ -3355,13 +3378,19 @@ func (m *Model) applyMetaInputSanitizer() {
 		m.input.SetValue(filterDigits(m.input.Value()))
 	case 4: // due datetime (accepts natural language: today, tomorrow, in 3d, ...)
 		m.input.SetValue(filterDueInput(m.input.Value()))
-	case 5: // start date
+	case 5: // assignee
+		m.input.SetValue(strings.TrimSpace(m.input.Value()))
+	case 6: // reporter
+		m.input.SetValue(strings.TrimSpace(m.input.Value()))
+	case 7: // start date
 		m.input.SetValue(filterDate(m.input.Value()))
-	case 6: // timezone
+	case 8: // end date/time
+		m.input.SetValue(filterDueInput(m.input.Value()))
+	case 9: // timezone
 		m.input.SetValue(filterTimezone(m.input.Value()))
-	case 7: // recurrence rule
+	case 10: // recurrence rule
 		m.input.SetValue(filterRule(m.input.Value()))
-	case 8: // interval
+	case 11: // interval
 		m.input.SetValue(filterDigits(m.input.Value()))
 	}
 	m.meta.setCurrentValue(m.input.Value())
@@ -3374,7 +3403,10 @@ func metaFields() []string {
 		"Tags",
 		"Priority",
 		"Due (YYYY-MM-DD or YYYY-MM-DD HH:MM)",
+		"Assignee",
+		"Reporter",
 		"Start Date (YYYY-MM-DD)",
+		"End (YYYY-MM-DD or YYYY-MM-DD HH:MM)",
 		"Timezone (UTC±HH:MM)",
 		"Recurrence",
 		"Interval",
@@ -3399,14 +3431,20 @@ func (ms metaState) currentValue() string {
 	case 4:
 		return ms.due
 	case 5:
-		return ms.start
+		return ms.assignee
 	case 6:
-		return ms.timezone
+		return ms.reporter
 	case 7:
-		return ms.rule
+		return ms.start
 	case 8:
-		return ms.interval
+		return ms.end
 	case 9:
+		return ms.timezone
+	case 10:
+		return ms.rule
+	case 11:
+		return ms.interval
+	case 12:
 		return ms.notes
 	default:
 		return ""
@@ -3426,14 +3464,20 @@ func (ms *metaState) setCurrentValue(v string) {
 	case 4:
 		ms.due = v
 	case 5:
-		ms.start = v
+		ms.assignee = v
 	case 6:
-		ms.timezone = v
+		ms.reporter = v
 	case 7:
-		ms.rule = v
+		ms.start = v
 	case 8:
-		ms.interval = v
+		ms.end = v
 	case 9:
+		ms.timezone = v
+	case 10:
+		ms.rule = v
+	case 11:
+		ms.interval = v
+	case 12:
 		ms.notes = v
 	}
 }
@@ -3489,6 +3533,11 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		m.status = fmt.Sprintf("start date invalid: %v", err)
 		return m, nil
 	}
+	end, err := parseDateTime(m.meta.end)
+	if err != nil {
+		m.status = fmt.Sprintf("end date invalid: %v", err)
+		return m, nil
+	}
 	timezone := normalizeTimezone(m.meta.timezone)
 	ruleInput := strings.TrimSpace(m.meta.rule)
 	rule := strings.TrimSpace(ruleInput)
@@ -3523,7 +3572,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		}
 		taskID = newID
 	}
-	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, timezone, priority, due, start, recurring); err != nil {
+	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, m.meta.assignee, m.meta.reporter, timezone, priority, due, start, end, recurring); err != nil {
 		return m, err
 	}
 	if err := m.store.UpdateRecurrence(taskID, rule, interval); err != nil {
@@ -3650,10 +3699,14 @@ func (m Model) renderMetaBox() string {
 		m.meta.tags,
 		m.meta.priority,
 		m.meta.due,
+		m.meta.assignee,
+		m.meta.reporter,
 		m.meta.start,
+		m.meta.end,
 		m.meta.timezone,
 		m.meta.rule,
 		m.meta.interval,
+		m.meta.notes,
 	}
 	var b strings.Builder
 	for i, name := range fields {
@@ -3687,14 +3740,20 @@ func (ms metaState) valueOf(idx int) string {
 	case 4:
 		return ms.due
 	case 5:
-		return ms.start
+		return ms.assignee
 	case 6:
-		return ms.timezone
+		return ms.reporter
 	case 7:
-		return ms.rule
+		return ms.start
 	case 8:
-		return ms.interval
+		return ms.end
 	case 9:
+		return ms.timezone
+	case 10:
+		return ms.rule
+	case 11:
+		return ms.interval
+	case 12:
 		return ms.notes
 	default:
 		return ""
@@ -3825,7 +3884,7 @@ func (m Model) renderModalFieldRow(f int, active bool, labelW, valueW int, now t
 		} else {
 			value = m.dueDisplay(now)
 		}
-	case 7: // recurrence
+	case 10: // recurrence
 		if active {
 			value = m.input.View()
 		} else {
@@ -3964,10 +4023,10 @@ func (m *Model) refreshReport() {
 
 	var overdue, todayList, upcoming, recurring []storage.Task
 	for _, t := range m.tasks {
-		if isRecurringTask(t) && !t.Done {
+		if isRecurringTask(t) && isActive(t) {
 			recurring = append(recurring, t)
 		}
-		if t.Done || !t.Due.Valid {
+		if isDone(t) || !t.Due.Valid {
 			continue
 		}
 		d := t.Due.Time
@@ -4111,8 +4170,12 @@ func (m Model) renderMetadataPanel() string {
 		{label: "Title", value: ""},
 		{label: "Topics", value: ""},
 		{label: "Tags", value: ""},
+		{label: "Assignee", value: ""},
+		{label: "Reporter", value: ""},
 		{label: "Priority", value: ""},
+		{label: "Due", value: ""},
 		{label: "Start", value: ""},
+		{label: "End", value: ""},
 		{label: "Timezone", value: ""},
 		{label: "Recurrence", value: ""},
 	}
@@ -4120,17 +4183,21 @@ func (m Model) renderMetadataPanel() string {
 		rows[0].value = task.Title
 		rows[1].value = emptyPlaceholder(strings.Join(task.Topics, ", "))
 		rows[2].value = emptyPlaceholder(task.Tags)
-		rows[3].value = fmt.Sprintf("%d", task.Priority)
-		rows[4].value = defaultStart(task)
-		rows[5].value = defaultTimezone(task.Timezone)
+		rows[3].value = emptyPlaceholder(task.Assignee)
+		rows[4].value = emptyPlaceholder(task.Reporter)
+		rows[5].value = fmt.Sprintf("%d", task.Priority)
+		rows[6].value = emptyPlaceholder(formatDateTime(task.Due))
+		rows[7].value = defaultStart(task)
+		rows[8].value = emptyPlaceholder(formatDateTime(task.End))
+		rows[9].value = defaultTimezone(task.Timezone)
 		if recSummary := recurrenceSummary(task); recSummary != "" {
 			if next, ok := nextRecurrenceDate(task); ok {
-				rows[6].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
+				rows[10].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
 			} else {
-				rows[6].value = recSummary
+				rows[10].value = recSummary
 			}
 		} else {
-			rows[6].value = "off"
+			rows[10].value = "off"
 		}
 	} else {
 		for i := range rows {
@@ -4265,9 +4332,12 @@ func (m Model) noteMetaBlockLines() []string {
 		rows = []row{
 			{label: "Topics", value: emptyPlaceholder(strings.Join(task.Topics, ", "))},
 			{label: "Tags", value: emptyPlaceholder(task.Tags)},
+			{label: "Assignee", value: emptyPlaceholder(task.Assignee)},
+			{label: "Reporter", value: emptyPlaceholder(task.Reporter)},
 			{label: "Priority", value: fmt.Sprintf("%d", task.Priority)},
 			{label: "Due", value: emptyPlaceholder(formatDateTime(task.Due))},
 			{label: "Start", value: emptyPlaceholder(formatDate(task.Start))},
+			{label: "End", value: emptyPlaceholder(formatDateTime(task.End))},
 			{label: "Timezone", value: emptyPlaceholder(defaultTimezone(task.Timezone))},
 			{label: "Recurrence", value: recurrence},
 		}
@@ -5059,8 +5129,8 @@ func (m *Model) sortTasks() {
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			a := m.tasks[i]
 			b := m.tasks[j]
-			if a.Done != b.Done {
-				return !a.Done && b.Done
+			if stateRank(a) != stateRank(b) {
+				return stateRank(a) < stateRank(b)
 			}
 			if a.Due.Valid && b.Due.Valid {
 				if !a.Due.Time.Equal(b.Due.Time) {
@@ -5080,8 +5150,8 @@ func (m *Model) sortTasks() {
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			a := m.tasks[i]
 			b := m.tasks[j]
-			if a.Done != b.Done {
-				return !a.Done && b.Done
+			if stateRank(a) != stateRank(b) {
+				return stateRank(a) < stateRank(b)
 			}
 			return a.ID < b.ID
 		})
@@ -5117,6 +5187,19 @@ func (m *Model) sortTasks() {
 	}
 }
 
+func stateRank(t storage.Task) int {
+	if isDone(t) {
+		return 3
+	}
+	if isOverdue(t) {
+		return 0
+	}
+	if t.Status == "IN-PROGRESS" {
+		return 1
+	}
+	return 2
+}
+
 func (m Model) currentTaskTitle() string {
 	t, ok := m.currentTask()
 	if !ok {
@@ -5146,14 +5229,6 @@ func clampInt(v, min, max int) int {
 		return max
 	}
 	return v
-}
-
-func overdueBadge(t storage.Task) string {
-	if !isOverdue(t) {
-		return ""
-	}
-	days := int(time.Since(t.Due.Time).Hours()/24) + 1
-	return fmt.Sprintf("[+%dd]", days)
 }
 
 func overdueDetail(t storage.Task) string {
@@ -5467,7 +5542,7 @@ func weekdayOffset(weekStart, target time.Weekday) int {
 }
 
 func isOverdue(t storage.Task) bool {
-	if t.Done {
+	if isDone(t) {
 		return false
 	}
 	if !t.Due.Valid {
@@ -5583,11 +5658,60 @@ func (m *Model) processScrollKey(key string, max int, scroll *int) bool {
 	return false
 }
 
-func humanDone(done bool) string {
-	if done {
-		return "✓"
+func taskStatusLabel(t storage.Task) string {
+	status := strings.ToUpper(strings.TrimSpace(t.Status))
+	if status == "" {
+		if t.Done {
+			status = "DONE"
+		} else {
+			status = "PENDING"
+		}
 	}
-	return "⏳"
+	if status == "DONE" {
+		return "DONE"
+	}
+	if isOverdue(t) {
+		return "OVERDUE"
+	}
+	if status == "IN-PROGRESS" {
+		return "IN-PROGRESS"
+	}
+	return "PENDING"
+}
+
+func isDone(t storage.Task) bool {
+	return t.Done || strings.ToUpper(strings.TrimSpace(t.Status)) == "DONE"
+}
+
+func isActive(t storage.Task) bool {
+	return !isDone(t)
+}
+
+func nextTaskStatus(t storage.Task) string {
+	switch strings.ToUpper(strings.TrimSpace(t.Status)) {
+	case "PENDING", "":
+		return "IN-PROGRESS"
+	case "IN-PROGRESS":
+		return "DONE"
+	default:
+		return "PENDING"
+	}
+}
+
+func topicListLabel(topics []string) string {
+	topics = uniqueTopics(topics)
+	if len(topics) == 0 {
+		return "-"
+	}
+	return strings.Join(topics, ",")
+}
+
+func emptyDash(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "-"
+	}
+	return v
 }
 
 func filterDigits(v string) string {
@@ -5843,7 +5967,7 @@ func (m Model) recentlyAdded(limit int) []storage.Task {
 func (m Model) recentlyDone(limit int) []storage.Task {
 	var done []storage.Task
 	for _, t := range m.tasks {
-		if t.Done {
+		if isDone(t) {
 			done = append(done, t)
 		}
 	}
@@ -5871,7 +5995,7 @@ func (m Model) countOverdue(list []storage.Task) int {
 	now := time.Now()
 	n := 0
 	for _, t := range list {
-		if t.Done || !t.Due.Valid {
+		if isDone(t) || !t.Due.Valid {
 			continue
 		}
 		if now.After(t.Due.Time) {
@@ -5913,16 +6037,8 @@ func (m Model) visibleItems() []listItem {
 func (m Model) defaultVisibleItems() []listItem {
 	items := make([]listItem, 0)
 	if m.currentTopic == "" {
-		for _, topic := range []string{"RecentlyAdded", "RecentlyDone"} {
-			items = append(items, listItem{kind: itemTopic, topic: topic})
-		}
-		for _, topic := range m.sortedTopics() {
-			items = append(items, listItem{kind: itemTopic, topic: topic})
-		}
 		for _, t := range m.tasks {
-			if len(t.Topics) == 0 {
-				items = append(items, listItem{kind: itemTask, task: t})
-			}
+			items = append(items, listItem{kind: itemTask, task: t, topic: strings.Join(t.Topics, ",")})
 		}
 		return items
 	}
@@ -5981,9 +6097,12 @@ func (m Model) searchActive() bool {
 }
 
 func taskMatchesQuery(t storage.Task, query string) bool {
-	fields := []string{t.Title, strings.Join(t.Topics, " "), t.Tags}
+	fields := []string{t.Title, strings.Join(t.Topics, " "), t.Tags, t.Assignee, t.Reporter}
 	if t.Due.Valid {
 		fields = append(fields, formatDateTime(t.Due))
+	}
+	if t.End.Valid {
+		fields = append(fields, formatDateTime(t.End))
 	}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), query) {
@@ -6106,9 +6225,9 @@ func (m Model) metaCompletions(fieldIndex int, prefix string) []string {
 		candidates = m.sortedTopics()
 	case 2: // Tags
 		candidates = m.sortedTags()
-	case 6: // Timezone
+	case 9: // Timezone
 		candidates = commonTimezones()
-	case 7: // Rule
+	case 10: // Rule
 		candidates = commonRecurrenceRules()
 	default:
 		return nil
