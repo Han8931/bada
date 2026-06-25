@@ -56,14 +56,24 @@ type Theme struct {
 	StatusFg    string `toml:"status_fg"`
 	StatusAltBg string `toml:"status_alt_bg"`
 	StatusAltFg string `toml:"status_alt_fg"`
+	HolidayBg   string `toml:"holiday_bg"`
+	RowStripeBg string `toml:"row_stripe_bg"`
+}
+
+// Holiday is a public holiday shaded on the timeline. Date is either a full
+// "YYYY-MM-DD" (a one-off, e.g. a moving holiday) or "MM-DD" (recurs yearly).
+type Holiday struct {
+	Date string `toml:"date"`
+	Name string `toml:"name"`
 }
 
 type Config struct {
-	DBPath        string `toml:"db_path"`
-	DefaultFilter string `toml:"default_filter"`
-	TrashDir      string `toml:"trash_dir"`
-	Keys          Keymap `toml:"keys"`
-	Theme         Theme  `toml:"theme"`
+	DBPath        string    `toml:"db_path"`
+	DefaultFilter string    `toml:"default_filter"`
+	TrashDir      string    `toml:"trash_dir"`
+	Keys          Keymap    `toml:"keys"`
+	Theme         Theme     `toml:"theme"`
+	Holidays      []Holiday `toml:"holidays"`
 }
 
 func LoadOrCreate(path string) (Config, error) {
@@ -220,7 +230,14 @@ func defaultConfig() Config {
 			StatusFg:    "#0F172A",
 			StatusAltBg: "#0F766E",
 			StatusAltFg: "#F8FAFC",
+			HolidayBg:   "#FECACA",
+			RowStripeBg: "#F1F5F9",
 		},
+		// Empty by default; users add their region's holidays, e.g.
+		//   [[holidays]]
+		//   date = "01-01"   # recurs yearly
+		//   name = "New Year's Day"
+		Holidays: nil,
 	}
 }
 

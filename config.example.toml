@@ -41,6 +41,7 @@ status_bg = "#E2E8F0"
 status_fg = "#0F172A"
 status_alt_bg = "#0F766E"
 status_alt_fg = "#F8FAFC"
+row_stripe_bg = "#F1F5F9"  # faint tint on alternating task rows ("" disables)
 
 # --- Dark slate theme (taskdog-style) -----------------------------------
 # To switch, replace the [theme] block above with the values below.
@@ -62,3 +63,4 @@ status_alt_fg = "#F8FAFC"
 # status_fg    = "#C0CAF5"
 # status_alt_bg = "#2A3F5F" # blue header bar / key chips
 # status_alt_fg = "#C0CAF5"
+# row_stripe_bg = "#1B202B" # faint tint on alternating task rows

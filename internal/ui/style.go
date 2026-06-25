@@ -72,18 +72,6 @@ func (m Model) panelTop(title string, inner int) string {
 	return bs.Render("╭─ ") + label + bs.Render(" "+strings.Repeat("─", midDashes)+"╮")
 }
 
-// legendBar renders compact status dots beneath the task list.
-func (m Model) legendBar() string {
-	sep := m.styles.Muted.Render("   ")
-	parts := []string{
-		m.styles.Warning.Render("●"),
-		m.styles.Success.Render("●"),
-		m.styles.Danger.Render("●"),
-		m.styles.Accent.Render("●"),
-	}
-	return " " + strings.Join(parts, sep)
-}
-
 // hintBar renders a row of highlighted key chips with muted labels.
 func (m Model) hintBar(hints []keyHint) string {
 	sep := m.styles.Muted.Render("  ")
@@ -93,6 +81,29 @@ func (m Model) hintBar(hints []keyHint) string {
 		parts = append(parts, cap+" "+m.styles.KeyLabel.Render(h.label))
 	}
 	return " " + strings.Join(parts, sep)
+}
+
+// stripeLine re-applies style's background across an already-rendered line so a
+// zebra tint survives the inner ANSI resets emitted by per-cell styling
+// (lipgloss drops the background after each reset, leaving gaps otherwise). When
+// the style carries no background (e.g. the color is empty or stripped in a
+// non-TTY) it returns the line unchanged.
+func stripeLine(style lipgloss.Style, line string) string {
+	open := bgOpenSeq(style)
+	if open == "" {
+		return line
+	}
+	return open + strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+open) + "\x1b[0m"
+}
+
+// bgOpenSeq extracts the leading SGR escape a style emits before its content, by
+// probing with a sentinel rune that never appears inside an escape sequence.
+func bgOpenSeq(style lipgloss.Style) string {
+	probe := style.Render("M")
+	if idx := strings.IndexByte(probe, 'M'); idx > 0 {
+		return probe[:idx]
+	}
+	return ""
 }
 
 // truncateANSI cuts a possibly styled string to a visible width, preserving

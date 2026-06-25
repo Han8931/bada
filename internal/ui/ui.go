@@ -73,23 +73,28 @@ type noteEditedMsg struct {
 }
 
 type uiStyles struct {
-	Title       lipgloss.Style
-	Heading     lipgloss.Style
-	Accent      lipgloss.Style
-	Muted       lipgloss.Style
-	Border      lipgloss.Style
-	Selection   lipgloss.Style
-	Done        lipgloss.Style
-	Danger      lipgloss.Style
-	Warning     lipgloss.Style
-	Success     lipgloss.Style
-	Status      lipgloss.Style
-	StatusAlt   lipgloss.Style
-	Panel       lipgloss.Style // rounded border for framed panels
-	PanelTitle  lipgloss.Style // title text shown in a panel's top border
-	TableHeader lipgloss.Style // colored column-header bar
-	KeyCap      lipgloss.Style // highlighted key glyph in hint bars
-	KeyLabel    lipgloss.Style // muted label following a KeyCap
+	Title          lipgloss.Style
+	Heading        lipgloss.Style
+	Accent         lipgloss.Style
+	Muted          lipgloss.Style
+	Border         lipgloss.Style
+	Selection      lipgloss.Style
+	Done           lipgloss.Style
+	Danger         lipgloss.Style
+	Warning        lipgloss.Style
+	Success        lipgloss.Style
+	Status         lipgloss.Style
+	StatusAlt      lipgloss.Style
+	StatusOverdue  lipgloss.Style // filled status badge: overdue (red)
+	StatusProgress lipgloss.Style // filled status badge: in-progress (amber)
+	StatusDone     lipgloss.Style // filled status badge: done (green)
+	StatusPending  lipgloss.Style // plain muted status: pending (no fill)
+	RowStripe      lipgloss.Style // faint background for alternating task rows
+	Panel          lipgloss.Style // rounded border for framed panels
+	PanelTitle     lipgloss.Style // title text shown in a panel's top border
+	TableHeader    lipgloss.Style // colored column-header bar
+	KeyCap         lipgloss.Style // highlighted key glyph in hint bars
+	KeyLabel       lipgloss.Style // muted label following a KeyCap
 }
 
 type metaState struct {
@@ -117,6 +122,7 @@ type metaState struct {
 	validation    string // inline validation message shown in the modal
 	dueComponent  int    // which part of the Due stepper is selected (0=Y..4=min)
 	dueTyping     string // digits typed into the active Due component (for direct entry)
+	dropdownOpen  bool   // Topic/Tags dropdown of previously-used values is showing
 }
 
 // fieldMore is a sentinel "index" for the modal's expand/collapse toggle row.
@@ -202,6 +208,7 @@ type Model struct {
 	status         string
 	filterDone     string
 	sortMode       string
+	sortReversed   bool
 	sortBuf        string
 	pendingSort    bool
 	currentTopic   string
@@ -232,7 +239,6 @@ type Model struct {
 	calendarDay    time.Time
 	calendarDetail bool
 	helpScroll     int
-	ganttScroll    int
 	statsScroll    int
 	configStage    configStage
 	pendingCfgPath string
@@ -274,7 +280,9 @@ func Run(store *storage.Store, cfg config.Config, configPath string, firstLaunch
 		m, _ = m.startConfig()
 	}
 
-	program := tea.NewProgram(m)
+	// Run in the alternate screen buffer so quitting restores the terminal to
+	// whatever was on screen before launch, leaving a clean screen on exit.
+	program := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = program.Run()
 	return err
 }
@@ -545,17 +553,14 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		}
 		return m.startMetadataEdit(task)
 	case m.cfg.Keys.SortDue:
-		m.sortMode = "due"
-		m.sortTasks()
-		m.status = "Sorted by due date"
+		m.applySortMode("due")
+		m.status = "Sorted by due date (" + m.sortDirLabel() + ")"
 	case m.cfg.Keys.SortPriority:
-		m.sortMode = "priority"
-		m.sortTasks()
-		m.status = "Sorted by priority"
+		m.applySortMode("priority")
+		m.status = "Sorted by priority (" + m.sortDirLabel() + ")"
 	case m.cfg.Keys.SortCreated:
-		m.sortMode = "created"
-		m.sortTasks()
-		m.status = "Sorted by created time"
+		m.applySortMode("created")
+		m.status = "Sorted by created time (" + m.sortDirLabel() + ")"
 	case m.cfg.Keys.Trash, "T":
 		return m.enterTrashView()
 	case "?":
@@ -645,28 +650,53 @@ func (m Model) View() string {
 		hints = m.hintBar(m.listHints())
 	}
 
-	// Bottom block: the Detail pane (and key hints), pinned to the screen bottom.
-	bottom := footer
+	// overhead is everything except the Tasks box body: its two borders, the
+	// key-hint line, and the bottom Detail pane. The Tasks box is then enlarged
+	// to fill the remaining height instead of shrinking to wrap the list.
+	overhead := 2 + countLines(footer) // 2 = panel borders
 	if showHints {
-		bottom += "\n" + hints
+		overhead += countLines(hints)
 	}
+
+	listMax := 0
+	if m.height > 0 {
+		listMax = (m.height - 1) - overhead
+		if listMax < 1 {
+			listMax = 1
+		}
+	}
+
+	var body string
+	if m.height > 0 {
+		body = m.renderTaskListWithHeight(listMax)
+		// Pad so the Tasks box fills its full height rather than wrapping a
+		// short list.
+		bodyLines := strings.Split(body, "\n")
+		for len(bodyLines) < listMax {
+			bodyLines = append(bodyLines, "")
+		}
+		body = strings.Join(bodyLines, "\n")
+	} else {
+		body = m.renderTaskList()
+	}
+
+	// Top: the enlarged task list. Then the key-hint line sits just above the
+	// Detail pane, which is pinned to the bottom.
+	top := m.panel("bada · Tasks", body)
 
 	if m.height <= 0 {
-		top := m.panel("bada · Tasks", m.renderTaskPaneBody(-1))
-		return m.fillView(top + "\n" + bottom)
+		out := top
+		if showHints {
+			out += "\n" + hints
+		}
+		return m.fillView(out + "\n" + footer)
 	}
 
-	// Make the Tasks panel the large upper box and leave only a single separator
-	// before the bottom Detail pane.
-	bottomLines := strings.Split(bottom, "\n")
-	bodyLines := (m.height - 1) - len(bottomLines) - 1 - 2 // separator + panel borders
-	if bodyLines < 1 {
-		bodyLines = 1
-	}
-	top := m.panel("bada · Tasks", m.renderTaskPaneBody(bodyLines))
 	lines := strings.Split(top, "\n")
-	lines = append(lines, "")
-	lines = append(lines, bottomLines...)
+	if showHints {
+		lines = append(lines, strings.Split(hints, "\n")...)
+	}
+	lines = append(lines, strings.Split(footer, "\n")...)
 	return m.fillView(strings.Join(lines, "\n"))
 }
 
@@ -941,7 +971,6 @@ func (m Model) enterHelpView() (tea.Model, tea.Cmd) {
 
 func (m Model) enterGanttView() (tea.Model, tea.Cmd) {
 	m.mode = modeGantt
-	m.ganttScroll = 0
 	m.status = "Gantt view"
 	return m, nil
 }
@@ -1104,20 +1133,20 @@ func (m Model) updateHelpMode(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateGanttMode(key string) (tea.Model, tea.Cmd) {
-	if m.processScrollKey(key, m.ganttMaxScroll(), &m.ganttScroll) {
-		return m, nil
-	}
+	vis := m.visibleItems()
 	switch key {
 	case "esc", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
 		m.status = "Gantt closed"
 		return m, nil
 	case m.cfg.Keys.Up, "up":
-		if m.ganttScroll > 0 {
-			m.ganttScroll--
+		if m.cursor > 0 {
+			m.cursor = clampCursor(m.cursor-1, len(vis))
 		}
 	case m.cfg.Keys.Down, "down":
-		m.ganttScroll = clampInt(m.ganttScroll+1, 0, m.ganttMaxScroll())
+		if len(vis) > 0 {
+			m.cursor = clampCursor(m.cursor+1, len(vis))
+		}
 	default:
 		return m, nil
 	}
@@ -1706,6 +1735,10 @@ Tasks:
   %s     Delete selected
   %s     Delete all done (with confirm)
 
+Sorting (press s, then):
+  d due · p priority · t created · o topic · a auto · s state
+  Repeat the same sort to reverse the order (↑/↓ in the status bar)
+
 Create/Edit Task:
   up/down or tab/shift+tab  Move fields
   enter / ^s               Save · esc  Cancel
@@ -2163,7 +2196,7 @@ func (m *Model) adjustTrashScroll() {
 
 func (m Model) ganttFooter() string {
 	return m.hintBar([]keyHint{
-		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "scroll"},
+		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "move"},
 		{m.cfg.Keys.Cancel, "close"},
 		{m.cfg.Keys.Quit, "quit"},
 	})
@@ -2171,254 +2204,20 @@ func (m Model) ganttFooter() string {
 
 func (m Model) renderGanttView() string {
 	footer := m.ganttFooter()
-	headerLines := m.renderGanttHeaderLines()
-	headerCount := 0
-	if strings.TrimSpace(headerLines) != "" {
-		headerCount = countLines(headerLines)
-	}
 	bodyMax := 0
 	if m.height > 0 {
-		bodyMax = m.height - 1 - 2 - countLines(footer) - headerCount // 2 = panel borders
+		bodyMax = m.height - 1 - 2 - countLines(footer) // 2 = panel borders
 		if bodyMax < 1 {
 			bodyMax = 1
 		}
 	}
-	var rows string
+	var body string
 	if m.height > 0 {
-		rows = m.renderGanttBody(bodyMax)
+		body = m.renderTimelinePaneBody(bodyMax)
 	} else {
-		rows = m.ganttContent()
+		body = m.renderTimelinePaneBody(-1)
 	}
-	body := rows
-	if headerCount > 0 {
-		body = headerLines + "\n" + rows
-	}
-	return m.panel("bada · Gantt", body) + "\n" + footer
-}
-
-func (m Model) renderGanttHeaderLines() string {
-	_, header := m.ganttDataRowsWithHeader()
-	if strings.TrimSpace(header) == "" {
-		return ""
-	}
-	parts := strings.Split(header, "\n")
-	lines := make([]string, 0, len(parts))
-	for i, part := range parts {
-		if i == 0 {
-			lines = append(lines, m.styles.Heading.Render(part))
-			continue
-		}
-		lines = append(lines, m.styles.Border.Render(part))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m Model) ganttContent() string {
-	rows := m.ganttRows()
-	if len(rows) == 0 {
-		return m.styles.Muted.Render("(no tasks with due dates)")
-	}
-	return strings.Join(rows, "\n")
-}
-
-func (m Model) ganttMaxScroll() int {
-	if m.height <= 0 {
-		return 0
-	}
-	headerLines := m.renderGanttHeaderLines()
-	headerCount := 0
-	if strings.TrimSpace(headerLines) != "" {
-		headerCount = countLines(headerLines)
-	}
-	bodyMax := m.height - 1 - 2 - countLines(m.ganttFooter()) - headerCount // 2 = panel borders
-	if bodyMax <= 0 {
-		return 0
-	}
-	rows := m.ganttRows()
-	if len(rows) <= bodyMax {
-		return 0
-	}
-	return len(rows) - bodyMax
-}
-
-func (m Model) renderGanttBody(maxLines int) string {
-	rows := m.ganttRows()
-	if maxLines <= 0 {
-		return ""
-	}
-	if len(rows) == 0 {
-		return m.styles.Muted.Render("(no tasks with due dates)")
-	}
-	maxScroll := len(rows) - maxLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	scroll := clampInt(m.ganttScroll, 0, maxScroll)
-	end := scroll + maxLines
-	if end > len(rows) {
-		end = len(rows)
-	}
-	return strings.Join(rows[scroll:end], "\n")
-}
-
-func (m Model) ganttRows() []string {
-	rows, _ := m.ganttDataRowsWithHeader()
-	return rows
-}
-
-func (m Model) ganttDataRowsWithHeader() ([]string, string) {
-	type ganttItem struct {
-		task  storage.Task
-		start time.Time
-		due   time.Time
-	}
-	items := make([]ganttItem, 0)
-	for _, t := range m.tasks {
-		if isDone(t) || !t.Due.Valid {
-			continue
-		}
-		start := t.CreatedAt
-		if t.Start.Valid {
-			start = t.Start.Time
-		}
-		start = normalizeDate(start)
-		due := normalizeDate(t.Due.Time)
-		if due.Before(start) {
-			start = due
-		}
-		items = append(items, ganttItem{task: t, start: start, due: due})
-	}
-	if len(items) == 0 {
-		barWidth := 40
-		if m.width > 0 {
-			barWidth = clampInt(m.panelInnerWidth()-52, 20, 60)
-		}
-		fallbackStart := normalizeDate(time.Now())
-		header := buildGanttHeader(fallbackStart, 14, barWidth)
-		return nil, header
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].start.Equal(items[j].start) {
-			return items[i].due.Before(items[j].due)
-		}
-		return items[i].start.Before(items[j].start)
-	})
-	minDate := items[0].start
-	maxDate := items[0].due
-	for _, it := range items[1:] {
-		if it.start.Before(minDate) {
-			minDate = it.start
-		}
-		if it.due.After(maxDate) {
-			maxDate = it.due
-		}
-	}
-	spanDays := int(maxDate.Sub(minDate).Hours()/24) + 1
-	if spanDays < 1 {
-		spanDays = 1
-	}
-	barWidth := 40
-	if m.width > 0 {
-		barWidth = clampInt(m.panelInnerWidth()-52, 20, 60)
-	}
-	rows := make([]string, 0, len(items))
-	header := buildGanttHeader(minDate, spanDays, barWidth)
-	today := normalizeDate(time.Now())
-	for _, it := range items {
-		title := truncateText(it.task.Title, 24)
-		bar := renderGanttBar(minDate, spanDays, barWidth, it.start, it.due, today)
-		line := fmt.Sprintf("%-4d %-24s %-10s %-10s %s", it.task.ID, title, it.start.Format("2006-01-02"), it.due.Format("2006-01-02"), bar)
-		rows = append(rows, line)
-	}
-	return rows, header
-}
-
-func buildGanttHeader(start time.Time, spanDays, barWidth int) string {
-	scaleLine, labelLine := renderGanttScaleLines(start, spanDays, barWidth)
-	return fmt.Sprintf("%-4s %-24s %-10s %-10s %s\n%-4s %-24s %-10s %-10s %s",
-		"ID", "Title", "Start", "Due", scaleLine,
-		"", "", "", "", labelLine,
-	)
-}
-
-func renderGanttScaleLines(start time.Time, spanDays, width int) (string, string) {
-	if width <= 0 {
-		return "", ""
-	}
-	if spanDays <= 1 {
-		return strings.Repeat("─", width), padRight(start.Format("Jan _2"), width)
-	}
-	scaleRunes := []rune(strings.Repeat("─", width))
-	for d := 0; d <= spanDays; d += 7 {
-		pos := (d * width) / spanDays
-		if pos >= width {
-			pos = width - 1
-		}
-		scaleRunes[pos] = '┬'
-	}
-	scaleLine := string(scaleRunes)
-	labelLine := renderGanttLabelLine(start, spanDays, width)
-	return scaleLine, labelLine
-}
-
-func renderGanttLabelLine(start time.Time, spanDays, width int) string {
-	positions := []int{0, width / 2, width - 6}
-	labels := []string{
-		start.Format("Jan _2"),
-		start.AddDate(0, 0, spanDays/2).Format("Jan _2"),
-		start.AddDate(0, 0, spanDays).Format("Jan _2"),
-	}
-	line := []rune(strings.Repeat(" ", width))
-	for i, pos := range positions {
-		if pos < 0 || pos >= width {
-			continue
-		}
-		label := []rune(labels[i])
-		for j := 0; j < len(label) && pos+j < width; j++ {
-			line[pos+j] = label[j]
-		}
-	}
-	return string(line)
-}
-
-func renderGanttBar(start time.Time, spanDays, width int, taskStart, taskDue, today time.Time) string {
-	if width <= 0 {
-		return ""
-	}
-	startOffset := int(taskStart.Sub(start).Hours() / 24)
-	endOffset := int(taskDue.Sub(start).Hours() / 24)
-	if startOffset < 0 {
-		startOffset = 0
-	}
-	if endOffset < startOffset {
-		endOffset = startOffset
-	}
-	if endOffset >= spanDays {
-		endOffset = spanDays - 1
-	}
-	startPos := (startOffset * width) / spanDays
-	endPos := (endOffset * width) / spanDays
-	if endPos < startPos {
-		endPos = startPos
-	}
-	todayOffset := int(today.Sub(start).Hours() / 24)
-	todayPos := (todayOffset * width) / spanDays
-	var b strings.Builder
-	for i := 0; i < width; i++ {
-		switch {
-		case i == startPos || i == endPos:
-			b.WriteRune('│')
-		case i > startPos && i < endPos:
-			b.WriteRune('─')
-		default:
-			b.WriteRune(' ')
-		}
-	}
-	bar := []rune(b.String())
-	if todayPos >= 0 && todayPos < width {
-		bar[todayPos] = '•'
-	}
-	return string(bar)
+	return m.panel(m.timelinePanelTitle(), body) + "\n" + footer
 }
 
 func renderHelp(k config.Keymap) string {
@@ -2430,27 +2229,495 @@ func (m Model) renderTaskList() string {
 	return m.renderTaskListWithHeight(-1)
 }
 
-func (m Model) renderTaskPaneBody(maxLines int) string {
-	legend := m.legendBar()
+func (m Model) renderTimelinePaneBody(maxLines int) string {
+	body := m.timelineGridLines(maxLines)
 	if maxLines <= 0 {
-		return m.renderTaskList() + "\n" + legend
+		return strings.Join(body, "\n")
+	}
+	if len(body) > maxLines {
+		body = body[:maxLines]
+	}
+	for len(body) < maxLines {
+		body = append(body, "")
+	}
+	return strings.Join(body, "\n")
+}
+
+// timelineCellW is the column width, in terminal cells, of a single day on the
+// timeline grid. Three keeps day numbers and bar blocks legible without bunching.
+const timelineCellW = 3
+
+// timelineItem is one task placed on the timeline grid, with its start/due
+// already normalized to whole days.
+type timelineItem struct {
+	task  storage.Task
+	start time.Time
+	due   time.Time
+}
+
+// timelineNavItems builds one timeline row per visible task, preserving the
+// list's order so the cursor maps 1:1 onto gantt rows for navigation. Tasks
+// without a due date are kept (selectable/editable) but render an empty track.
+func (m Model) timelineNavItems() []timelineItem {
+	items := make([]timelineItem, 0)
+	for _, it := range m.visibleItems() {
+		if it.kind != itemTask {
+			continue
+		}
+		t := it.task
+		start := t.CreatedAt
+		if t.Start.Valid {
+			start = t.Start.Time
+		}
+		start = normalizeDate(start)
+		due := start
+		if t.Due.Valid {
+			due = normalizeDate(t.Due.Time)
+			if due.Before(start) {
+				start = due
+			}
+		}
+		items = append(items, timelineItem{task: t, start: start, due: due})
+	}
+	return items
+}
+
+// timelineScale describes the timeline's horizontal axis: the date at column 0,
+// how many calendar days each column spans (the zoom unit), the column count,
+// and the left label gutter width. Columns are always timelineCellW cells wide
+// regardless of the zoom unit.
+type timelineScale struct {
+	start    time.Time
+	unitDays int
+	colCount int
+	leftW    int
+}
+
+func (s timelineScale) colStartDate(i int) time.Time { return s.start.AddDate(0, 0, i*s.unitDays) }
+func (s timelineScale) colEndDate(i int) time.Time {
+	return s.start.AddDate(0, 0, (i+1)*s.unitDays-1)
+}
+
+// colOf returns the column index containing date d (may be <0 or >=colCount).
+func (s timelineScale) colOf(d time.Time) int {
+	return floorDiv(dayIndexUTC(d, s.start), s.unitDays)
+}
+
+func (s timelineScale) unitLabel() string {
+	u := s.unitDays
+	switch {
+	case u == 1:
+		return "1col=1d"
+	case u == 7:
+		return "1col=1wk"
+	case u%365 == 0:
+		if y := u / 365; y > 1 {
+			return fmt.Sprintf("1col=%dyr", y)
+		}
+		return "1col=1yr"
+	case u%30 == 0:
+		if mo := u / 30; mo > 1 {
+			return fmt.Sprintf("1col=%dmo", mo)
+		}
+		return "1col=1mo"
+	default:
+		return fmt.Sprintf("1col=%dd", u)
+	}
+}
+
+// dayIndexUTC counts whole calendar days from ref to d, using UTC midnights so
+// the arithmetic is exact (no DST hour drift).
+func dayIndexUTC(d, ref time.Time) int {
+	du := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	ru := time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, time.UTC)
+	return int(du.Sub(ru).Hours() / 24)
+}
+
+func floorDiv(a, b int) int {
+	q := a / b
+	if a%b != 0 && (a < 0) != (b < 0) {
+		q--
+	}
+	return q
+}
+
+// chooseUnit picks days-per-column so a spanDays-long range fits within cols,
+// snapping to friendly units (day → week → month → quarter → half-year → year →
+// multi-year) and reserving a column of padding on each side.
+func chooseUnit(spanDays, cols int) int {
+	eff := cols - 2
+	if eff < 1 {
+		eff = cols
+	}
+	if spanDays <= eff {
+		return 1
+	}
+	// 1wk, 1mo, 3mo, 6mo, 1yr, 2yr, 3yr, 5yr, 10yr.
+	for _, u := range []int{7, 30, 90, 180, 365, 365 * 2, 365 * 3, 365 * 5, 365 * 10} {
+		if u*eff >= spanDays {
+			return u
+		}
+	}
+	// Beyond ~a century of span, snap up to whole years.
+	years := (spanDays + 365*eff - 1) / (365 * eff)
+	return years * 365
+}
+
+func selectedTimelineItem(items []timelineItem, cursor int) (timelineItem, bool) {
+	if cursor < 0 || cursor >= len(items) {
+		return timelineItem{}, false
+	}
+	return items[cursor], true
+}
+
+// timelineWindow computes the visible date span and column layout. By default it
+// keeps today in view and pulls back to reveal the earliest dated task. When the
+// selected task's start→due span doesn't fit a daily window, it zooms the unit
+// out (week/month) and reframes so that task's whole bar — and its due date —
+// stays visible.
+func (m Model) timelineWindow(items []timelineItem) timelineScale {
+	inner := m.panelInnerWidth()
+	gridWidth := clampInt(inner-40, 21, 90)
+	colCount := gridWidth / timelineCellW
+	if colCount < 7 {
+		colCount = 7
+	}
+	leftW := inner - colCount*timelineCellW - 1
+	if leftW < 24 {
+		leftW = 24
 	}
 
-	legendLines := countLines(legend)
-	listMax := maxLines - legendLines
-	if listMax < 1 {
-		return m.renderTaskListWithHeight(maxLines)
+	today := normalizeDate(time.Now())
+	start := today.AddDate(0, 0, -2)
+	haveMin := false
+	var minStart time.Time
+	for _, it := range items {
+		if !it.task.Due.Valid {
+			continue // undated tasks don't anchor the date axis
+		}
+		if !haveMin || it.start.Before(minStart) {
+			minStart = it.start
+			haveMin = true
+		}
+	}
+	// Pull the window back so earlier (e.g. overdue) tasks stay on screen.
+	if haveMin && minStart.Before(start) {
+		start = minStart
+	}
+	// ...but never so far back that today scrolls off the right edge.
+	earliest := today.AddDate(0, 0, -(colCount - 3))
+	if start.Before(earliest) {
+		start = earliest
 	}
 
-	lines := strings.Split(m.renderTaskListWithHeight(listMax), "\n")
-	for len(lines) < listMax {
-		lines = append(lines, "")
+	// Zoom to the selected task when its span overflows the default daily window.
+	if sel, ok := selectedTimelineItem(items, m.cursor); ok && sel.task.Due.Valid {
+		lo := start
+		if sel.start.Before(lo) {
+			lo = sel.start
+		}
+		if today.Before(lo) {
+			lo = today
+		}
+		hi := today
+		if sel.due.After(hi) {
+			hi = sel.due
+		}
+		spanDays := dayIndexUTC(hi, lo) + 1
+		unit := chooseUnit(spanDays, colCount)
+		if unit > 1 {
+			return timelineScale{start: lo.AddDate(0, 0, -unit), unitDays: unit, colCount: colCount, leftW: leftW}
+		}
+		// Daily unit still fits; shift the window if the task falls outside it.
+		if sel.start.Before(start) || sel.due.After(start.AddDate(0, 0, colCount-1)) {
+			start = lo
+		}
 	}
-	lines = append(lines, strings.Split(legend, "\n")...)
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
+	return timelineScale{start: start, unitDays: 1, colCount: colCount, leftW: leftW}
+}
+
+// timelinePanelTitle labels the pane with its visible date span, echoing the
+// reference's "Gantt Chart (start to end)" header.
+func (m Model) timelinePanelTitle() string {
+	scale := m.timelineWindow(m.timelineNavItems())
+	start := scale.colStartDate(0)
+	end := scale.colEndDate(scale.colCount - 1)
+	unit := ""
+	if scale.unitDays > 1 {
+		unit = " · " + scale.unitLabel()
 	}
-	return strings.Join(lines, "\n")
+	return fmt.Sprintf("bada · Timeline · %s–%s%s · ↑ due", start.Format("Jan 2"), end.Format("Jan 2"), unit)
+}
+
+// ganttColCellBg paints calendar-only backgrounds for a Gantt cell. The left
+// task label is rendered separately, so row/date tinting stays confined to the
+// timeline grid.
+func (m Model) ganttColCellBg(base lipgloss.Style, isToday, striped bool) lipgloss.Style {
+	switch {
+	case isToday:
+		if c := m.cfg.Theme.SelectionBg; c != "" {
+			base = base.Background(lipgloss.Color(c))
+		}
+	case striped:
+		if c := m.cfg.Theme.RowStripeBg; c != "" {
+			base = base.Background(lipgloss.Color(c))
+		}
+	}
+	return base
+}
+
+func (m Model) ganttHeaderCellBg(base lipgloss.Style, d time.Time, isToday bool) lipgloss.Style {
+	if isToday {
+		if c := m.cfg.Theme.SelectionBg; c != "" {
+			base = base.Background(lipgloss.Color(c))
+		}
+	}
+	return base
+}
+
+func (m Model) timelineGridLines(maxLines int) []string {
+	items := m.timelineNavItems()
+	scale := m.timelineWindow(items)
+	today := normalizeDate(time.Now())
+
+	lines := make([]string, 0)
+	lines = append(lines, m.timelineMonthHeader(scale, today))
+	lines = append(lines, m.timelineDayHeader(scale, today))
+
+	rowBudget := len(items)
+	if maxLines > 0 {
+		rowBudget = maxLines - len(lines) - 1 // reserve a row for the legend
+		if rowBudget < 0 {
+			rowBudget = 0
+		}
+	}
+	if rowBudget > len(items) {
+		rowBudget = len(items)
+	}
+
+	// Scroll the row window so the cursor's row stays visible.
+	scroll := 0
+	if rowBudget > 0 && m.cursor >= rowBudget {
+		scroll = m.cursor - rowBudget + 1
+	}
+	if maxScroll := len(items) - rowBudget; scroll > maxScroll {
+		scroll = maxScroll
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+
+	for i := 0; i < rowBudget && scroll+i < len(items); i++ {
+		idx := scroll + i
+		lines = append(lines, m.timelineTaskRow(items[idx], scale, today, idx == m.cursor, idx%2 == 1))
+	}
+	if len(items) == 0 {
+		lines = append(lines, m.styles.Muted.Render("(no tasks)"))
+	}
+	// Pin the legend to the bottom of the box: pad blank rows between the last
+	// task and the legend so it doesn't float up under a short list.
+	if maxLines > 0 {
+		for len(lines) < maxLines-1 {
+			lines = append(lines, "")
+		}
+	}
+	if maxLines <= 0 || len(lines) < maxLines {
+		lines = append(lines, m.timelineLegend())
+	}
+	return lines
+}
+
+func (m Model) timelineMonthHeader(scale timelineScale, today time.Time) string {
+	n := scale.colCount
+	cells := make([]rune, n*timelineCellW)
+	for i := range cells {
+		cells[i] = ' '
+	}
+	// Zoomed in (day/week), the top row labels months at month boundaries.
+	// Zoomed out (month or coarser), it labels years at year boundaries so a long
+	// timeline stays oriented instead of cramming "JanFeb…" with no anchor. Years
+	// print 4-digit while sparse, but 2-digit ("'26") at year+ zoom where every
+	// column is a new year and 4 digits would collide.
+	coarse := scale.unitDays >= 28
+	prevKey := -1
+	for i := 0; i < n; i++ {
+		d := scale.colStartDate(i)
+		key := int(d.Month())
+		text := d.Format("Jan")
+		if coarse {
+			key = d.Year()
+			if scale.unitDays >= 365 {
+				text = "'" + d.Format("06")
+			} else {
+				text = d.Format("2006")
+			}
+		}
+		if i == 0 || key != prevKey {
+			label := []rune(text)
+			pos := i * timelineCellW
+			for j := 0; j < len(label) && pos+j < len(cells); j++ {
+				cells[pos+j] = label[j]
+			}
+		}
+		prevKey = key
+	}
+	todayCol := scale.colOf(today)
+	// Mark today with a dot above its column when the slot is free.
+	if todayCol >= 0 && todayCol < n {
+		if c := todayCol*timelineCellW + 1; cells[c] == ' ' {
+			cells[c] = '•'
+		}
+	}
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fg := m.styles.Accent
+		if i == todayCol {
+			fg = m.styles.Accent.Bold(true)
+		}
+		seg := string(cells[i*timelineCellW : i*timelineCellW+timelineCellW])
+		b.WriteString(m.ganttHeaderCellBg(fg, scale.colStartDate(i), i == todayCol).Render(seg))
+	}
+	return m.styles.Muted.Render(padRightWidth("", scale.leftW)) + " " + b.String()
+}
+
+func (m Model) timelineDayHeader(scale timelineScale, today time.Time) string {
+	var b strings.Builder
+	todayCol := scale.colOf(today)
+	// Zoomed out, the second row carries month abbreviations (the year sits on the
+	// row above); zoomed in, it carries day-of-month numbers.
+	monthMode := scale.unitDays >= 28
+	for i := 0; i < scale.colCount; i++ {
+		d := scale.colStartDate(i)
+		cell := fmt.Sprintf("%2d ", d.Day())
+		if monthMode {
+			// Numeric months (" 7 ", "12 ") read clearly under the year row above
+			// and leave gaps, where packed "JulAugSep" names look cramped.
+			cell = fmt.Sprintf("%2d ", int(d.Month()))
+		}
+		var fg lipgloss.Style
+		switch {
+		case i == todayCol:
+			fg = m.styles.Accent.Bold(true)
+		case scale.unitDays > 1:
+			// Weekend/holiday shading is only meaningful at daily resolution.
+			fg = m.styles.Muted
+		case isHoliday(m, d):
+			fg = m.styles.Danger
+			if c := m.cfg.Theme.HolidayBg; c != "" {
+				fg = fg.Background(lipgloss.Color(c))
+			}
+		case d.Weekday() == time.Saturday || d.Weekday() == time.Sunday:
+			fg = m.styles.Danger
+			if c := m.cfg.Theme.StatusBg; c != "" {
+				fg = fg.Background(lipgloss.Color(c))
+			}
+		default:
+			fg = m.styles.Muted
+		}
+		b.WriteString(m.ganttHeaderCellBg(fg, d, i == todayCol).Render(cell))
+	}
+	return m.styles.TableHeader.Render(padRightWidth("  ID  Task", scale.leftW)) + " " + b.String()
+}
+
+func isHoliday(m Model, d time.Time) bool {
+	_, ok := m.holidayName(d)
+	return ok
+}
+
+// holidayName reports whether d is a configured public holiday, returning its
+// name. A holiday date is matched as a full "2006-01-02" (one-off) or a "01-02"
+// month-day that recurs every year.
+func (m Model) holidayName(d time.Time) (string, bool) {
+	full := d.Format("2006-01-02")
+	md := d.Format("01-02")
+	for _, h := range m.cfg.Holidays {
+		switch strings.TrimSpace(h.Date) {
+		case full, md:
+			return h.Name, true
+		}
+	}
+	return "", false
+}
+
+func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.Time, selected, striped bool) string {
+	task := it.task
+	hasDue := task.Due.Valid
+	marker := "  "
+	if selected {
+		marker = "▌ "
+	}
+	label := fmt.Sprintf("%s%-3d %s", marker, task.ID, truncateText(task.Title, scale.leftW-7))
+	dueCol := -1
+	if hasDue {
+		dueCol = scale.colOf(it.due)
+	}
+	todayCol := scale.colOf(today)
+	var b strings.Builder
+	for i := 0; i < scale.colCount; i++ {
+		cs := scale.colStartDate(i)
+		ce := scale.colEndDate(i)
+		content := " · "
+		fg := m.styles.Muted
+		// A wide column is "in plan" when it overlaps the task's start→due span.
+		inPlan := hasDue && !it.start.After(ce) && !it.due.Before(cs)
+		if inPlan {
+			content = "━━━"
+			fg = m.styles.Border
+			if task.Status == "IN-PROGRESS" {
+				fg = m.styles.Success
+			}
+		}
+		if i == dueCol {
+			content = "███"
+			fg = m.styles.Accent.Bold(true)
+			bandColor := m.cfg.Theme.Accent
+			if isOverdue(task) {
+				fg = m.styles.Danger.Bold(true)
+				bandColor = m.cfg.Theme.Danger
+			}
+			if bandColor != "" {
+				fg = fg.Background(lipgloss.Color(bandColor))
+			}
+		}
+		if i == todayCol && !inPlan && i != dueCol {
+			content = " │ "
+			fg = m.styles.Accent
+		}
+		b.WriteString(m.ganttColCellBg(fg, i == todayCol, striped && !selected).Render(content))
+	}
+	labelOut := padRightWidth(label, scale.leftW)
+	if selected {
+		labelOut = m.styles.Selection.Render(labelOut)
+	}
+	return labelOut + " " + b.String()
+}
+
+func (m Model) timelineLegend() string {
+	weekend := m.styles.Muted
+	if c := m.cfg.Theme.StatusBg; c != "" {
+		weekend = weekend.Background(lipgloss.Color(c))
+	}
+	todayCol := m.styles.Accent
+	if c := m.cfg.Theme.SelectionBg; c != "" {
+		todayCol = todayCol.Background(lipgloss.Color(c))
+	}
+	parts := []string{
+		m.styles.Border.Render("━━") + m.styles.Muted.Render(" planned"),
+		m.styles.Success.Render("━━") + m.styles.Muted.Render(" in-progress"),
+		m.styles.Accent.Render("██") + m.styles.Muted.Render(" due"),
+		m.styles.Danger.Render("██") + m.styles.Muted.Render(" overdue"),
+		weekend.Render("  ") + m.styles.Muted.Render(" weekend"),
+		todayCol.Render("│ ") + m.styles.Muted.Render(" today"),
+	}
+	// Only advertise holidays when the user has configured some.
+	if len(m.cfg.Holidays) > 0 {
+		holiday := m.styles.Danger
+		if c := m.cfg.Theme.HolidayBg; c != "" {
+			holiday = holiday.Background(lipgloss.Color(c))
+		}
+		parts = append(parts, holiday.Render("  ")+m.styles.Muted.Render(" holiday"))
+	}
+	return " " + strings.Join(parts, m.styles.Muted.Render("  "))
 }
 
 func (m Model) renderTaskListWithHeight(maxLines int) string {
@@ -2458,14 +2725,20 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 	inner := m.panelInnerWidth()
 
 	statusW := 11
-	assigneeW := 10
-	topicW := 12
-	titleW := inner - 65
+	assigneeW := 7
+	reporterW := 7
+	topicW := 8
+	tagsW := 8
+	recurrenceW := 8
+	dateW := 10
+	// Title leads the row and takes whatever the other columns don't: lead (2) +
+	// 10 non-title columns (83) + their 10 separating spaces = 95.
+	titleW := inner - 95
 	if titleW < 10 {
 		titleW = 10
 	}
-	if titleW > 42 {
-		titleW = 42
+	if titleW > 50 {
+		titleW = 50
 	}
 
 	full := func(style lipgloss.Style, s string) string {
@@ -2477,7 +2750,30 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 		search := fmt.Sprintf(" Search: %q (%d result(s))", m.searchQuery, len(items))
 		lines = append(lines, full(m.styles.Accent, search))
 	}
-	header := fmt.Sprintf("  %-*s %-*s %-*s %-4s %-16s  %-*s", statusW, "Status", titleW, "Title", assigneeW, "Assignee", "Pri", "Due", topicW, "Topic")
+	// sortCol appends a direction triangle to the column whose sort mode is
+	// active (▲ default order, ▼ reversed), mirroring the status-bar arrow.
+	sortMark := "▲"
+	if m.sortReversed {
+		sortMark = "▼"
+	}
+	sortCol := func(label, mode string) string {
+		if m.sortMode == mode {
+			return label + sortMark
+		}
+		return label
+	}
+	header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-4s %-*s %-*s %-*s %-*s %-*s",
+		titleW, sortCol("Title", "title"),
+		statusW, sortCol("Status", "state"),
+		topicW, sortCol("Topic", "topic"),
+		assigneeW, "Assign",
+		reporterW, "Report",
+		sortCol("Pri", "priority"),
+		dateW, "Due-in",
+		dateW, sortCol("Due", "due"),
+		dateW, "End",
+		recurrenceW, "Recur",
+		tagsW, "Tags")
 	lines = append(lines, full(m.styles.TableHeader, header))
 
 	itemLines := make([]string, 0, len(items))
@@ -2503,36 +2799,69 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 			itemLines = append(itemLines, line)
 		case itemTask:
 			title := truncateText(it.task.Title, titleW)
-			status := taskStatusLabel(it.task)
 			assignee := truncateText(emptyDash(it.task.Assignee), assigneeW)
+			reporter := truncateText(emptyDash(it.task.Reporter), reporterW)
 			topic := truncateText(topicListLabel(it.task.Topics), topicW)
-			due := displayDate(it.task.Due)
+			tags := truncateText(emptyDash(it.task.Tags), tagsW)
+			dueIn := truncateText(relativeDueCell(it.task.Due), dateW)
+			due := truncateText(dateCell(it.task.Due), dateW)
+			end := truncateText(dateCell(it.task.End), dateW)
+			recurrence := truncateText(emptyDash(recurrenceSummary(it.task)), recurrenceW)
 			if due == "" {
 				due = "pending"
 			}
-			pri := fmt.Sprintf("P%d", it.task.Priority)
-			body := fmt.Sprintf("  %-*s %-*s %-*s %-4s %-16s  %-*s", statusW, status, titleW, title, assigneeW, assignee, pri, due, topicW, topic)
+			buildBody := func(statusField, priField string) string {
+				return fmt.Sprintf("  %-*s %s %-*s %-*s %-*s %s %-*s %-*s %-*s %-*s %-*s",
+					titleW, title,
+					statusField,
+					topicW, topic,
+					assigneeW, assignee,
+					reporterW, reporter,
+					priField,
+					dateW, dueIn,
+					dateW, due,
+					dateW, end,
+					recurrenceW, recurrence,
+					tagsW, tags)
+			}
 
 			recBadge := recurrenceBadge(it.task)
 			if selected {
+				body := buildBody(m.statusField(it.task, statusW, false), m.priorityField(it.task.Priority, false))
 				if recBadge != "" {
 					body += "  " + recBadge
 				}
 				itemLines = append(itemLines, full(m.styles.Selection, body))
 				continue
 			}
-			if recBadge != "" {
-				body += "  " + m.styles.Warning.Render(recBadge)
-			}
+			// Color the status badge and priority flag only on default rows;
+			// selection/done rows recolor the whole line, so use plain cells there
+			// to avoid clashing.
+			var line string
 			switch {
 			case m.isTaskSelected(it.task.ID):
-				body = full(m.styles.Warning, body)
+				body := buildBody(m.statusField(it.task, statusW, false), m.priorityField(it.task.Priority, false))
+				if recBadge != "" {
+					body += "  " + m.styles.Warning.Render(recBadge)
+				}
+				line = full(m.styles.Warning, body)
 			case isDone(it.task):
-				body = full(m.styles.Done, body)
+				body := buildBody(m.statusField(it.task, statusW, false), m.priorityField(it.task.Priority, false))
+				if recBadge != "" {
+					body += "  " + m.styles.Warning.Render(recBadge)
+				}
+				line = full(m.styles.Done, body)
 			default:
-				body = full(lipgloss.NewStyle(), body)
+				body := buildBody(m.statusField(it.task, statusW, true), m.priorityField(it.task.Priority, true))
+				if recBadge != "" {
+					body += "  " + m.styles.Warning.Render(recBadge)
+				}
+				line = full(lipgloss.NewStyle(), body)
 			}
-			itemLines = append(itemLines, body)
+			if i%2 == 1 && !m.isTaskSelected(it.task.ID) && !isDone(it.task) {
+				line = stripeLine(m.styles.RowStripe, line)
+			}
+			itemLines = append(itemLines, line)
 		}
 	}
 	if len(items) == 0 {
@@ -2759,6 +3088,19 @@ func buildStyles(theme config.Theme) uiStyles {
 	styles.StatusAlt = applyBg(styles.StatusAlt, theme.StatusAltBg)
 	styles.StatusAlt = applyFg(styles.StatusAlt, theme.StatusAltFg)
 
+	// Filled, color-coded status badges. Text uses the light status-alt
+	// foreground (white fallback) for contrast against the colored fills.
+	badgeFg := theme.StatusAltFg
+	if strings.TrimSpace(badgeFg) == "" {
+		badgeFg = "#FFFFFF"
+	}
+	styles.StatusOverdue = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Danger), badgeFg)
+	styles.StatusProgress = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Warning), badgeFg)
+	styles.StatusDone = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Success), badgeFg)
+	styles.StatusPending = applyFg(lipgloss.NewStyle(), theme.Muted)
+
+	styles.RowStripe = applyBg(lipgloss.NewStyle(), theme.RowStripeBg)
+
 	// Structural styles derived from the theme so they stay configurable
 	// while giving bada a cohesive, taskdog-like framed look.
 	styles.Panel = applyFg(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()), theme.Border)
@@ -2920,6 +3262,7 @@ func (m *Model) focusMetaField() {
 	m.meta.completions = nil
 	m.meta.completionIdx = 0
 	m.meta.lastInput = ""
+	m.meta.dropdownOpen = false
 	m.input.Width = 36
 	// The toggle row and the stepper fields (Priority, Due) aren't typed into,
 	// so the text input stays blurred there.
@@ -2979,6 +3322,31 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 	onPriority := m.meta.index == 3
 	onRecurrence := m.meta.index == 10
 	onDue := m.meta.index == 4
+	onSuggestable := m.meta.index == 1 || m.meta.index == 2 // Topics, Tags
+
+	// While the Topic/Tags dropdown is open it captures navigation and selection;
+	// any other key falls through so typing keeps filtering the list.
+	if m.meta.dropdownOpen {
+		switch key {
+		case m.cfg.Keys.Cancel, "esc":
+			m.meta.dropdownOpen = false
+			m.status = "List closed"
+			return m, nil
+		case "up", "shift+tab", "ctrl+p":
+			if n := len(m.meta.completions); n > 0 {
+				m.meta.completionIdx = wrapIndex(m.meta.completionIdx-1, n)
+			}
+			return m, nil
+		case "down", "tab", "ctrl+n":
+			if n := len(m.meta.completions); n > 0 {
+				m.meta.completionIdx = wrapIndex(m.meta.completionIdx+1, n)
+			}
+			return m, nil
+		case m.cfg.Keys.Confirm, "enter":
+			m.applyDropdownSelection()
+			return m, nil
+		}
+	}
 
 	switch key {
 	case m.cfg.Keys.Cancel, "esc":
@@ -2997,7 +3365,16 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 		return m.saveMeta()
-	case "tab", "down":
+	case "tab":
+		// On Topic/Tags, Tab opens a dropdown of previously-used values instead
+		// of advancing the field.
+		if onSuggestable {
+			m.openDropdown()
+			return m, nil
+		}
+		m.metaMove(1)
+		return m, nil
+	case "down":
 		m.metaMove(1)
 		return m, nil
 	case "shift+tab", "up":
@@ -3090,6 +3467,13 @@ func (m Model) updateMetadataMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cm
 	m.input, cmd = m.input.Update(msg)
 	m.applyMetaInputSanitizer()
 	m.meta.validation = ""
+	// Keep the open dropdown filtered to what's being typed in the last token.
+	if m.meta.dropdownOpen {
+		m.meta.completions = m.metaCompletions(m.meta.index, dropdownPrefix(m.input.Value()))
+		if m.meta.completionIdx >= len(m.meta.completions) {
+			m.meta.completionIdx = 0
+		}
+	}
 	return m, cmd
 }
 
@@ -3133,6 +3517,57 @@ func (m Model) saveMeta() (tea.Model, tea.Cmd) {
 	m.input.Blur()
 	m.status = "Task " + verb
 	return m, nil
+}
+
+// dropdownPrefix returns the token currently being typed in a comma-separated
+// field (Topics/Tags) — the text after the last comma — so the dropdown filters
+// on it while keeping any already-entered values intact.
+func dropdownPrefix(s string) string {
+	if i := strings.LastIndex(s, ","); i >= 0 {
+		return strings.TrimSpace(s[i+1:])
+	}
+	return strings.TrimSpace(s)
+}
+
+// openDropdown shows the list of previously-used Topics/Tags for the current
+// field, filtered by what's already typed.
+func (m *Model) openDropdown() {
+	if m.meta == nil {
+		return
+	}
+	m.meta.setCurrentValue(m.input.Value())
+	m.meta.completions = m.metaCompletions(m.meta.index, dropdownPrefix(m.input.Value()))
+	m.meta.completionIdx = 0
+	if len(m.meta.completions) == 0 {
+		m.meta.dropdownOpen = false
+		m.status = "No previously-used values"
+		return
+	}
+	m.meta.dropdownOpen = true
+	m.status = "↑↓ select · ⏎ use · esc close"
+}
+
+// applyDropdownSelection inserts the highlighted suggestion into the field,
+// replacing the last comma-separated token, then closes the dropdown.
+func (m *Model) applyDropdownSelection() {
+	if m.meta == nil {
+		return
+	}
+	if len(m.meta.completions) == 0 {
+		m.meta.dropdownOpen = false
+		return
+	}
+	sel := m.meta.completions[m.meta.completionIdx]
+	cur := m.input.Value()
+	newVal := sel
+	if i := strings.LastIndex(cur, ","); i >= 0 {
+		newVal = strings.TrimRight(cur[:i+1], " ") + " " + sel
+	}
+	m.input.SetValue(newVal)
+	m.input.CursorEnd()
+	m.meta.setCurrentValue(newVal)
+	m.meta.dropdownOpen = false
+	m.status = "Selected: " + sel
 }
 
 // cycleCompletion advances the autocomplete suggestion for the current field.
@@ -3767,7 +4202,7 @@ func (m Model) renderMetaModalView() string {
 
 	listMax := 0
 	if m.height > 0 {
-		listMax = (m.height - 1) - 3 // panel borders (2) + legend (1)
+		listMax = (m.height - 1) - 2 // panel borders (2)
 		if listMax < 1 {
 			listMax = 1
 		}
@@ -3816,7 +4251,7 @@ func (m Model) renderMetaModalView() string {
 		bodyLines[r] = line
 	}
 
-	return m.panel("bada · Tasks", strings.Join(bodyLines, "\n")) + "\n" + m.legendBar()
+	return m.panel("bada · Tasks", strings.Join(bodyLines, "\n"))
 }
 
 // renderCreateModal builds the bordered dialog box (title, fields, toggle,
@@ -3851,6 +4286,9 @@ func (m Model) renderCreateModal() string {
 			continue
 		}
 		lines = append(lines, m.renderModalFieldRow(f, active, labelW, valueW, now))
+		if active && m.meta.dropdownOpen {
+			lines = append(lines, m.renderModalDropdown()...)
+		}
 	}
 	lines = append(lines, "")
 	if m.meta.validation != "" {
@@ -3905,13 +4343,53 @@ func (m Model) renderModalFieldRow(f int, active bool, labelW, valueW int, now t
 	return marker + labelStr + "  " + value
 }
 
+// renderModalDropdown lists previously-used Topic/Tag values under the active
+// field, highlighting the current selection and windowing long lists.
+func (m Model) renderModalDropdown() []string {
+	items := m.meta.completions
+	label := "tags"
+	if m.meta.index == 1 {
+		label = "topics"
+	}
+	if len(items) == 0 {
+		return []string{m.styles.Muted.Render("    (no matching " + label + ")")}
+	}
+	const maxShow = 6
+	start := 0
+	if m.meta.completionIdx >= maxShow {
+		start = m.meta.completionIdx - maxShow + 1
+	}
+	end := start + maxShow
+	if end > len(items) {
+		end = len(items)
+	}
+	out := make([]string, 0, maxShow+2)
+	out = append(out, m.styles.Muted.Render(fmt.Sprintf("    previously used %s:", label)))
+	for i := start; i < end; i++ {
+		if i == m.meta.completionIdx {
+			out = append(out, m.styles.Selection.Render("  ▸ "+items[i]))
+		} else {
+			out = append(out, m.styles.Muted.Render("    "+items[i]))
+		}
+	}
+	if len(items) > end {
+		out = append(out, m.styles.Muted.Render(fmt.Sprintf("    … +%d more", len(items)-end)))
+	}
+	return out
+}
+
 // modalHintLine renders the keys relevant to the current field.
 func (m Model) modalHintLine() string {
+	if m.meta.dropdownOpen {
+		return m.styles.Muted.Render("↑↓:select · ⏎:use · esc:close · type to filter")
+	}
 	switch m.meta.index {
 	case 4: // Due stepper
 		return m.styles.Muted.Render("type digits or +/-:set · ←→:part · x:no due · tab:next · ⏎:save")
 	case 3: // Priority stepper
 		return m.styles.Muted.Render("+/-:priority · tab:next · ⏎:save · esc:cancel")
+	case 1, 2: // Topics, Tags
+		return m.styles.Muted.Render("tab:pick from list · ↑↓:move · ⏎:save · esc:cancel")
 	default:
 		return m.styles.Muted.Render("tab/↑↓:move · ⏎:save · esc:cancel · ^n/^p:complete")
 	}
@@ -3935,12 +4413,93 @@ func (m Model) renderModalToggleRow(active bool) string {
 func (m Model) priorityDisplay(active bool) string {
 	disp := "—"
 	if v := strings.TrimSpace(m.meta.priority); v != "" {
-		disp = "P" + v
+		if p, err := strconv.Atoi(v); err == nil {
+			disp = m.priorityBadge(p)
+		} else {
+			disp = v
+		}
 	}
 	if active {
-		return m.styles.Accent.Render("‹ " + disp + " ›")
+		return m.styles.Accent.Render("‹ ") + disp + m.styles.Accent.Render(" ›")
 	}
 	return disp
+}
+
+// priorityStyle maps a priority (higher = more urgent; 0 = none) to its color.
+// The ramp runs muted → green → amber → red so urgency reads at a glance.
+func (m Model) priorityStyle(p int) lipgloss.Style {
+	switch {
+	case p <= 0:
+		return m.styles.Muted
+	case p <= 2:
+		return m.styles.Success
+	case p == 3:
+		return m.styles.Warning
+	case p == 4:
+		return m.styles.Danger
+	default: // 5+
+		return m.styles.Danger.Bold(true)
+	}
+}
+
+// priorityBadge renders a colored flag instead of the unintuitive "P0/P1" text;
+// the color alone conveys urgency. Priority 0 shows a muted outline flag.
+func (m Model) priorityBadge(p int) string {
+	if p <= 0 {
+		return m.styles.Muted.Render("⚐")
+	}
+	return m.priorityStyle(p).Render("⚑")
+}
+
+// priorityField returns the fixed 4-wide task-list cell for a priority, colored
+// only when the surrounding row isn't itself recolored (selection/done), so the
+// flag's color never fights the row highlight.
+func (m Model) priorityField(p int, colored bool) string {
+	txt := "⚐"
+	if p > 0 {
+		txt = "⚑"
+	}
+	pad := 4 - lipgloss.Width(txt)
+	if pad < 0 {
+		pad = 0
+	}
+	cell := txt
+	if colored {
+		if p <= 0 {
+			cell = m.styles.Muted.Render(txt)
+		} else {
+			cell = m.priorityStyle(p).Render(txt)
+		}
+	}
+	return cell + strings.Repeat(" ", pad)
+}
+
+// statusField returns the status-column cell padded to width. When colored, the
+// state renders as a filled badge (overdue red, in-progress amber, done green);
+// pending is plain muted text. Like priorityField, it's only colored on default
+// rows — selection/done rows recolor the whole line, so it returns a plain label
+// there to avoid clashing. In-progress is abbreviated so the padded badge fits.
+func (m Model) statusField(t storage.Task, width int, colored bool) string {
+	label := taskStatusLabel(t)
+	if !colored {
+		return fmt.Sprintf("%-*s", width, label)
+	}
+	var rendered string
+	switch label {
+	case "OVERDUE":
+		rendered = m.styles.StatusOverdue.Render(" OVERDUE ")
+	case "IN-PROGRESS":
+		rendered = m.styles.StatusProgress.Render(" IN-PROG ")
+	case "DONE":
+		rendered = m.styles.StatusDone.Render(" DONE ")
+	default: // PENDING
+		rendered = m.styles.StatusPending.Render(label)
+	}
+	pad := width - lipgloss.Width(rendered)
+	if pad < 0 {
+		pad = 0
+	}
+	return rendered + strings.Repeat(" ", pad)
 }
 
 // renderDueStepper draws the active Due field as Y-M-D H:M with the selected
@@ -4185,8 +4744,13 @@ func (m Model) renderMetadataPanel() string {
 		rows[2].value = emptyPlaceholder(task.Tags)
 		rows[3].value = emptyPlaceholder(task.Assignee)
 		rows[4].value = emptyPlaceholder(task.Reporter)
-		rows[5].value = fmt.Sprintf("%d", task.Priority)
+		rows[5].value = m.priorityBadge(task.Priority)
 		rows[6].value = emptyPlaceholder(formatDateTime(task.Due))
+		if task.Due.Valid {
+			if name, ok := m.holidayName(normalizeDate(task.Due.Time)); ok && name != "" {
+				rows[6].value += "  " + m.styles.Danger.Render("· "+name)
+			}
+		}
 		rows[7].value = defaultStart(task)
 		rows[8].value = emptyPlaceholder(formatDateTime(task.End))
 		rows[9].value = defaultTimezone(task.Timezone)
@@ -4334,7 +4898,7 @@ func (m Model) noteMetaBlockLines() []string {
 			{label: "Tags", value: emptyPlaceholder(task.Tags)},
 			{label: "Assignee", value: emptyPlaceholder(task.Assignee)},
 			{label: "Reporter", value: emptyPlaceholder(task.Reporter)},
-			{label: "Priority", value: fmt.Sprintf("%d", task.Priority)},
+			{label: "Priority", value: m.priorityBadge(task.Priority)},
 			{label: "Due", value: emptyPlaceholder(formatDateTime(task.Due))},
 			{label: "Start", value: emptyPlaceholder(formatDate(task.Start))},
 			{label: "End", value: emptyPlaceholder(formatDateTime(task.End))},
@@ -4621,46 +5185,94 @@ func emptyPlaceholder(v string) string {
 }
 
 func (m Model) renderStatusBar() string {
-	modeLabel := m.modeLabel()
-	style := m.styles.Status
+	base := m.styles.Status
 	if m.mode == modeTrash || m.mode == modeNote {
-		style = m.styles.StatusAlt
+		base = m.styles.StatusAlt
 	}
-	if m.width > 0 {
-		style = style.Width(m.width).MaxWidth(m.width)
+	th := m.cfg.Theme
+
+	// chip renders a bold, distinctly-backed badge; seg/sp keep the status
+	// background while tinting the foreground so sections stay separable.
+	chip := func(s, bg, fg string) string {
+		st := base.Bold(true)
+		if bg != "" {
+			st = st.Background(lipgloss.Color(bg))
+		}
+		if fg != "" {
+			st = st.Foreground(lipgloss.Color(fg))
+		}
+		return st.Render(" " + s + " ")
 	}
-	if m.mode == modeReport {
-		return style.Render(fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status))
+	seg := func(s, fg string) string {
+		st := base
+		if fg != "" {
+			st = st.Foreground(lipgloss.Color(fg))
+		}
+		return st.Render(s)
 	}
-	if m.mode == modeNote {
+	sp := base.Render("  ")
+	gap := base.Render(" ")
+
+	brand := chip("bada", th.Accent, "#FFFFFF")
+	modeC := chip(m.modeLabel(), th.StatusAltBg, th.StatusAltFg)
+	head := brand + gap + modeC
+
+	var content string
+	switch {
+	case m.mode == modeReport:
+		content = head + sp + seg(m.status, "")
+	case m.mode == modeNote:
 		target := ""
 		if m.note != nil {
 			target = m.note.target.label()
 		}
-		if target != "" {
-			return style.Render(fmt.Sprintf("[bada] [%s] %s  %s", modeLabel, target, m.status))
-		}
-		return style.Render(fmt.Sprintf("[bada] [%s] %s", modeLabel, m.status))
-	}
-	if m.mode == modeTrash {
+		content = head + sp + seg(target, th.Heading) + sp + seg(m.status, "")
+	case m.mode == modeTrash:
 		sel := m.selectedTrashCount()
 		total := len(m.trash)
 		cur := 0
 		if total > 0 {
 			cur = m.trashCursor + 1
 		}
-		return style.Render(fmt.Sprintf("[bada] [%s] cur:%d/%d sel:%d path:%s  %s", modeLabel, cur, total, sel, m.store.TrashDir(), m.status))
+		content = head + sp +
+			seg(fmt.Sprintf("%d/%d", cur, total), th.Success) + gap +
+			seg(fmt.Sprintf("sel:%d", sel), th.Warning) + sp +
+			seg("path:"+m.store.TrashDir(), th.Muted) + sp +
+			seg(m.status, "")
+	default:
+		total := len(m.visibleItems())
+		cursor := 0
+		if total > 0 {
+			cursor = clampCursor(m.cursor, total) + 1
+		}
+		sortArrow := "↑"
+		if m.sortReversed {
+			sortArrow = "↓"
+		}
+		content = head + sp +
+			seg("sort:", th.Muted) + seg(m.sortMode+sortArrow, th.Accent) + sp +
+			seg(fmt.Sprintf("%d/%d", cursor, total), th.Success)
+		if m.searchActive() {
+			content += sp + seg(fmt.Sprintf("search:%q", m.searchQuery), th.Warning)
+		}
+		if strings.TrimSpace(m.status) != "" {
+			content += sp + seg(m.status, th.Heading)
+		}
 	}
-	total := len(m.visibleItems())
-	cursor := 0
-	if total > 0 {
-		cursor = clampCursor(m.cursor, total) + 1
+	return m.padStatusBar(base, content)
+}
+
+// padStatusBar fills the status line to the full width with the bar background
+// (or truncates it), so the colored bar spans the whole row.
+func (m Model) padStatusBar(base lipgloss.Style, content string) string {
+	if m.width <= 0 {
+		return content
 	}
-	search := ""
-	if m.searchActive() {
-		search = fmt.Sprintf(" search:%q", m.searchQuery)
+	w := lipgloss.Width(content)
+	if w >= m.width {
+		return truncateANSI(content, m.width)
 	}
-	return style.Render(fmt.Sprintf("[bada] [%s] sort:%s%s  %d/%d  %s", modeLabel, m.sortMode, search, cursor, total, m.status))
+	return content + base.Render(strings.Repeat(" ", m.width-w))
 }
 
 func (m Model) fillView(body string) string {
@@ -5123,6 +5735,26 @@ func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// applySortMode sets the sort key, or—if it's already active—flips the
+// direction, so pressing the same sort again reverses the order.
+func (m *Model) applySortMode(mode string) {
+	if m.sortMode == mode {
+		m.sortReversed = !m.sortReversed
+	} else {
+		m.sortMode = mode
+		m.sortReversed = false
+	}
+	m.sortTasks()
+}
+
+// sortDirLabel describes the current direction for status messages.
+func (m Model) sortDirLabel() string {
+	if m.sortReversed {
+		return "reversed"
+	}
+	return "default order"
+}
+
 func (m *Model) sortTasks() {
 	switch m.sortMode {
 	case "auto":
@@ -5176,15 +5808,52 @@ func (m *Model) sortTasks() {
 			}
 			return m.tasks[i].Priority > m.tasks[j].Priority
 		})
+	case "title":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			ti := strings.ToLower(strings.TrimSpace(m.tasks[i].Title))
+			tj := strings.ToLower(strings.TrimSpace(m.tasks[j].Title))
+			if ti != tj {
+				return ti < tj
+			}
+			return m.tasks[i].ID < m.tasks[j].ID
+		})
 	case "created":
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			return m.tasks[i].CreatedAt.Before(m.tasks[j].CreatedAt)
+		})
+	case "topic":
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			ti, tj := topicSortKey(m.tasks[i]), topicSortKey(m.tasks[j])
+			if ti != tj {
+				if ti == "" { // untopiced tasks sort last
+					return false
+				}
+				if tj == "" {
+					return true
+				}
+				return ti < tj
+			}
+			return m.tasks[i].ID < m.tasks[j].ID
 		})
 	default:
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			return m.tasks[i].ID < m.tasks[j].ID
 		})
 	}
+	if m.sortReversed {
+		for i, j := 0, len(m.tasks)-1; i < j; i, j = i+1, j-1 {
+			m.tasks[i], m.tasks[j] = m.tasks[j], m.tasks[i]
+		}
+	}
+}
+
+// topicSortKey is the lowercased topic string a task sorts under (empty when it
+// has no topics, so those fall to the end).
+func topicSortKey(t storage.Task) string {
+	if len(t.Topics) == 0 {
+		return ""
+	}
+	return strings.ToLower(strings.Join(t.Topics, ","))
 }
 
 func stateRank(t storage.Task) int {
@@ -5556,42 +6225,47 @@ func (m *Model) processSortKey(key string) bool {
 	if key == "" {
 		return false
 	}
-	if key == "s" {
-		m.sortBuf = "s"
-		m.status = "Sort: press d (due), p (priority), t (created), a (auto), s (state)"
-		return true
-	}
+	// Complete a pending sequence first, so the second key of `ss` reaches the
+	// state case below rather than re-arming the `s` prefix.
 	if m.sortBuf == "s" {
 		switch key {
 		case "d":
-			m.sortMode = "due"
-			m.sortTasks()
+			m.applySortMode("due")
 			m.pendingSort = false
-			m.status = "Sorted by due date"
+			m.status = "Sorted by due date (" + m.sortDirLabel() + ")"
 		case "p":
-			m.sortMode = "priority"
-			m.sortTasks()
+			m.applySortMode("priority")
 			m.pendingSort = false
-			m.status = "Sorted by priority"
+			m.status = "Sorted by priority (" + m.sortDirLabel() + ")"
 		case "t":
-			m.sortMode = "created"
-			m.sortTasks()
+			m.applySortMode("title")
 			m.pendingSort = false
-			m.status = "Sorted by created time"
+			m.status = "Sorted by title (" + m.sortDirLabel() + ")"
+		case "c":
+			m.applySortMode("created")
+			m.pendingSort = false
+			m.status = "Sorted by created time (" + m.sortDirLabel() + ")"
+		case "o":
+			m.applySortMode("topic")
+			m.pendingSort = false
+			m.status = "Sorted by topic (" + m.sortDirLabel() + ")"
 		case "a":
-			m.sortMode = "auto"
-			m.sortTasks()
+			m.applySortMode("auto")
 			m.pendingSort = false
-			m.status = "Sorted by auto (state/priority/due)"
+			m.status = "Sorted by auto (" + m.sortDirLabel() + ")"
 		case "s":
-			m.sortMode = "state"
-			m.sortTasks()
+			m.applySortMode("state")
 			m.pendingSort = false
-			m.status = "Sorted by state (pending first)"
+			m.status = "Sorted by state (" + m.sortDirLabel() + ")"
 		default:
 			m.status = "Sort cancelled"
 		}
 		m.sortBuf = ""
+		return true
+	}
+	if key == "s" {
+		m.sortBuf = "s"
+		m.status = "Sort: d (due), p (priority), t (title), c (created), o (topic), a (auto), s (state) — repeat to reverse"
 		return true
 	}
 	// reset buffer on other keys
@@ -5712,6 +6386,37 @@ func emptyDash(v string) string {
 		return "-"
 	}
 	return v
+}
+
+func dateCell(t sql.NullTime) string {
+	if !t.Valid {
+		return "-"
+	}
+	return t.Time.Format("2006-01-02")
+}
+
+// relativeDueCell renders a due date relative to today — "today", "tomorrow",
+// "yesterday", "in Nd", or "Nd ago". An empty due renders "-". Days are counted
+// on UTC calendar boundaries to stay consistent with the absolute date cells.
+func relativeDueCell(t sql.NullTime) string {
+	if !t.Valid {
+		return "-"
+	}
+	today := normalizeDate(time.Now().UTC())
+	due := normalizeDate(t.Time.UTC())
+	days := int((due.Unix() - today.Unix()) / 86400)
+	switch {
+	case days == 0:
+		return "today"
+	case days == 1:
+		return "tomorrow"
+	case days == -1:
+		return "yesterday"
+	case days > 0:
+		return fmt.Sprintf("in %dd", days)
+	default:
+		return fmt.Sprintf("%dd ago", -days)
+	}
 }
 
 func filterDigits(v string) string {

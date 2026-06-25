@@ -18,8 +18,11 @@ bada uses a framed, "taskdog-inspired" terminal UI:
 - **Framed panels** — every screen is drawn in a rounded, titled panel
   (`bada · Tasks`, `bada · Calendar`, `bada · Gantt`, `bada · Trash`,
   `bada · Help`).
-- **Task table** — columns for status, title, assignee, priority (`Pn`), due,
-  and topic, under a colored header bar. Recurring (`[recur …]`) badges appear inline.
+- **Timeline panel** — a compact Gantt-style day grid of active dated tasks sits
+  above the task table.
+- **Task table** — columns for status, title, assignee, reporter, priority
+  (`Pn`), due-in (relative, e.g. `in 3d`/`today`/`2d ago`), due, end, topic,
+  tags, timezone, recurrence, and notes.
 - **Full-width selection bar** highlights the current row; done tasks are
   struck through, multi-selected tasks are tinted.
 - **Status-dot legend** (`●  ●  ●  ●`) and a
@@ -47,11 +50,10 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 
 - Status: `r` rotates `PENDING` → `IN-PROGRESS` → `DONE`.
 - Delete to trash: `D` (`X` deletes all done).
-- Edit / rename: `e` opens the metadata editor. The current task's fields show in the
-  **`bada · Detail`** pane below the list.
-- Priority: `+` / `-` (max 10).
+- Edit / rename: `e` opens the metadata editor.
+- Priority: `+` / `-` (max 5).
 - Due shift: `]` / `[` (+1d/-1d).
-- Sort: `s` then `d/p/t/a/s` (due/priority/created/auto/state).
+- Sort: `s` then `d/p/t/c/o/a/s` (due/priority/title/created/topic/auto/state).
 - `gg` / `G` bindings (jump to top / bottom)
 - Search: `/` opens a query prompt; `Enter` applies, `Esc` cancels (submit empty to clear).
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview.

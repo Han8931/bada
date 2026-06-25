@@ -25,6 +25,7 @@ Tracking UI/UX work. Impact / effort tags are rough guides.
 
 ## Task list readability
 
+- [ ] Monday app style editing (Project-based progress customization)
 - [ ] Relative due dates (`today`, `tomorrow`, `in 3d`, `2d ago`), colored — high / low
 - [ ] Priority heat: color the `Pn` cell by level (or dots/bars) — med / low
 - [ ] Due-today coloring (amber, between future and overdue) — med / low
@@ -60,6 +61,13 @@ Tracking UI/UX work. Impact / effort tags are rough guides.
 
 - [ ] Calendar load heatmap + per-day priority dots — med / med
 - [ ] Gantt: color bars by status/priority, weekend shading, clearer "today" line — med / med
+
+## Features (planned — owner: @han)
+
+- [ ] **Job/task detail customization** — let users customize the task detail view
+      (which fields show, their order/labels) — high / med
+- [ ] **Project-level task management** — manage tasks by project levels
+      (a project grouping above topics, with per-project views/filters) — high / high
 
 ---
 

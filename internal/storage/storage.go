@@ -331,11 +331,19 @@ func (s *Store) DeleteTask(id int) error {
 	if err := s.moveToTrash([]Task{task}); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, id); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`DELETE FROM tasks WHERE id = ?;`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM tasks WHERE id = ?;`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteDoneTasks() (int64, error) {
@@ -347,17 +355,31 @@ func (s *Store) DeleteDoneTasks() (int64, error) {
 		if err := s.moveToTrash(doneTasks); err != nil {
 			return 0, err
 		}
-		for _, task := range doneTasks {
-			if _, err := s.db.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, task.ID); err != nil {
-				return 0, err
-			}
-		}
 	}
-	res, err := s.db.Exec(`DELETE FROM tasks WHERE done = 1;`)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	for _, task := range doneTasks {
+		if _, err := tx.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, task.ID); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+	res, err := tx.Exec(`DELETE FROM tasks WHERE done = 1;`)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return rows, nil
 }
 
 func (s *Store) RenameTopic(oldName, newName string) (int64, error) {
