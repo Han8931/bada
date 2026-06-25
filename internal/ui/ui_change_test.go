@@ -75,10 +75,9 @@ func TestStatusBadge(t *testing.T) {
 	}
 }
 
-// TestZebraStripesOddRows confirms alternating task rows get the faint stripe
-// background and that it survives the inner per-cell ANSI resets (so the tint is
-// continuous, not gapped after the status badge).
-func TestZebraStripesOddRows(t *testing.T) {
+// TestTaskListHasNoRowTint confirms task rows do not get alternating
+// row-wise background tints.
+func TestTaskListHasNoRowTint(t *testing.T) {
 	old := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(old)
@@ -96,12 +95,12 @@ func TestZebraStripesOddRows(t *testing.T) {
 		t.Skip("color profile stripped the stripe background")
 	}
 	lines := strings.Split(m.renderTaskListWithHeight(10), "\n")
-	// lines[0]=header, [1]=row index 0 (even, unstriped), [2]=row index 1 (odd).
+	// lines[0]=header, [1]=row index 0, [2]=row index 1.
 	if strings.Contains(lines[1], stripe) {
-		t.Fatalf("even row should not be striped: %q", lines[1])
+		t.Fatalf("first task row should not carry row tint: %q", lines[1])
 	}
-	if n := strings.Count(lines[2], stripe); n < 2 {
-		t.Fatalf("odd row should be striped with the tint re-asserted across resets, asserts=%d: %q", n, lines[2])
+	if strings.Contains(lines[2], stripe) {
+		t.Fatalf("second task row should not carry row tint: %q", lines[2])
 	}
 }
 
@@ -336,9 +335,9 @@ func TestGanttNavigationSelectsTask(t *testing.T) {
 	}
 }
 
-// TestGanttRowTintStaysInCalendarGrid confirms alternating Gantt row
-// backgrounds make the calendar area easier to scan without tinting task labels.
-func TestGanttRowTintStaysInCalendarGrid(t *testing.T) {
+// TestGanttHasNoRowTint confirms the Gantt view does not apply alternating
+// row-wise backgrounds to either task labels or calendar cells.
+func TestGanttHasNoRowTint(t *testing.T) {
 	old := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(old)
@@ -359,15 +358,9 @@ func TestGanttRowTintStaysInCalendarGrid(t *testing.T) {
 	it := timelineItem{
 		task: storage.Task{ID: 1, Title: "Alpha", Status: "PENDING"},
 	}
-	row := m.timelineTaskRow(it, scale, scale.start.AddDate(0, 0, -10), false, true)
-	label := row[:scale.leftW]
-	grid := row[scale.leftW+1:]
-
-	if strings.Contains(label, stripeParam) {
-		t.Fatalf("task label should not carry calendar row tint, got %q", label)
-	}
-	if !strings.Contains(grid, stripeParam) {
-		t.Fatalf("calendar grid should carry row tint, got %q", grid)
+	row := m.timelineTaskRow(it, scale, scale.start.AddDate(0, 0, -10), false)
+	if strings.Contains(row, stripeParam) {
+		t.Fatalf("gantt row should not carry row tint, got %q", row)
 	}
 }
 

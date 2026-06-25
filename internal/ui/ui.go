@@ -2449,17 +2449,10 @@ func (m Model) timelinePanelTitle() string {
 	return fmt.Sprintf("bada · Timeline · %s–%s%s · ↑ due", start.Format("Jan 2"), end.Format("Jan 2"), unit)
 }
 
-// ganttColCellBg paints calendar-only backgrounds for a Gantt cell. The left
-// task label is rendered separately, so row/date tinting stays confined to the
-// timeline grid.
-func (m Model) ganttColCellBg(base lipgloss.Style, isToday, striped bool) lipgloss.Style {
-	switch {
-	case isToday:
+// ganttColCellBg paints date backgrounds for a Gantt cell.
+func (m Model) ganttColCellBg(base lipgloss.Style, isToday bool) lipgloss.Style {
+	if isToday {
 		if c := m.cfg.Theme.SelectionBg; c != "" {
-			base = base.Background(lipgloss.Color(c))
-		}
-	case striped:
-		if c := m.cfg.Theme.RowStripeBg; c != "" {
 			base = base.Background(lipgloss.Color(c))
 		}
 	}
@@ -2509,7 +2502,7 @@ func (m Model) timelineGridLines(maxLines int) []string {
 
 	for i := 0; i < rowBudget && scroll+i < len(items); i++ {
 		idx := scroll + i
-		lines = append(lines, m.timelineTaskRow(items[idx], scale, today, idx == m.cursor, idx%2 == 1))
+		lines = append(lines, m.timelineTaskRow(items[idx], scale, today, idx == m.cursor))
 	}
 	if len(items) == 0 {
 		lines = append(lines, m.styles.Muted.Render("(no tasks)"))
@@ -2639,7 +2632,7 @@ func (m Model) holidayName(d time.Time) (string, bool) {
 	return "", false
 }
 
-func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.Time, selected, striped bool) string {
+func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.Time, selected bool) string {
 	task := it.task
 	hasDue := task.Due.Valid
 	marker := "  "
@@ -2683,7 +2676,7 @@ func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.
 			content = " │ "
 			fg = m.styles.Accent
 		}
-		b.WriteString(m.ganttColCellBg(fg, i == todayCol, striped && !selected).Render(content))
+		b.WriteString(m.ganttColCellBg(fg, i == todayCol).Render(content))
 	}
 	labelOut := padRightWidth(label, scale.leftW)
 	if selected {
@@ -2857,9 +2850,6 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 					body += "  " + m.styles.Warning.Render(recBadge)
 				}
 				line = full(lipgloss.NewStyle(), body)
-			}
-			if i%2 == 1 && !m.isTaskSelected(it.task.ID) && !isDone(it.task) {
-				line = stripeLine(m.styles.RowStripe, line)
 			}
 			itemLines = append(itemLines, line)
 		}
