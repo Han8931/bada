@@ -622,28 +622,31 @@ func (m Model) View() string {
 	}
 
 	if m.mode == modeReport {
-		header := m.renderReportHeader()
 		footer := m.renderReportFooter()
-		gap := "\n"
-		tail := ""
-		bodyMax := 0
-		if m.height > 0 {
-			available := m.height - 1
-			bodyMax = available - countLines(header) - countLines(footer) - countLines(gap) - countLines(tail)
-			if bodyMax < 0 {
-				bodyMax = 0
-			}
+		if m.height <= 0 {
+			return m.fillView(m.renderReportHeader() + m.report + "\n" + footer)
 		}
-		b.WriteString(header)
-		if m.height > 0 {
-			b.WriteString(m.renderReportWithHeight(bodyMax))
-		} else {
-			b.WriteString(m.report)
+		// Assemble as explicit lines and pad before the footer so the "Press …"
+		// hint stays pinned to the bottom (just above the status bar) regardless of
+		// how short the agenda is.
+		headerLines := strings.Split(strings.TrimRight(m.renderReportHeader(), "\n"), "\n")
+		footerLines := strings.Split(footer, "\n")
+		target := m.height - 1 // rows above the status bar
+		bodyMax := target - len(headerLines) - len(footerLines) - 1
+		if bodyMax < 0 {
+			bodyMax = 0
 		}
-		b.WriteString(gap)
-		b.WriteString(footer)
-		b.WriteString(tail)
-		return m.fillView(b.String())
+		out := make([]string, 0, target)
+		out = append(out, headerLines...)
+		out = append(out, strings.Split(m.renderReportWithHeight(bodyMax), "\n")...)
+		for len(out) < target-len(footerLines) {
+			out = append(out, "")
+		}
+		out = append(out, footerLines...)
+		if len(out) > target {
+			out = out[:target]
+		}
+		return m.fillView(strings.Join(out, "\n"))
 	}
 
 	if m.mode == modeCalendar {
@@ -1747,10 +1750,11 @@ func dateKey(t time.Time, loc *time.Location) string {
 }
 
 func (m Model) renderReportHeader() string {
+	now := time.Now()
 	var b strings.Builder
 	b.WriteString(m.renderListBanner())
 	b.WriteString("\n\n")
-	b.WriteString(m.styles.Accent.Render("#### Reminder Report ####"))
+	b.WriteString(m.styles.Heading.Render(fmt.Sprintf("  %s, it's %s", greetingForTime(now), now.Format("Monday, Jan 2"))))
 	b.WriteString("\n\n")
 	return b.String()
 }
@@ -1798,7 +1802,14 @@ func (m Model) renderReportWithHeight(maxLines int) string {
 	if end > len(lines) {
 		end = len(lines)
 	}
-	return strings.Join(lines[scroll:end], "\n")
+	// Pad to the full body height so the footer ("Press …") stays pinned to the
+	// bottom instead of floating up under a short agenda.
+	visible := make([]string, 0, maxLines)
+	visible = append(visible, lines[scroll:end]...)
+	for len(visible) < maxLines {
+		visible = append(visible, "")
+	}
+	return strings.Join(visible, "\n")
 }
 
 func (m Model) helpFooter() string {
@@ -4874,109 +4885,108 @@ func (m *Model) refreshReport() {
 		}
 	}
 
+	// Title column scales with the terminal; the rest of the line (id prefix +
+	// trailing date) is ~30 cells. "∙" is one cell even in CJK/Termius, unlike "•".
+	titleW := clampInt(m.width-34, 16, 52)
 	var b strings.Builder
 	writeDivider := func() {
 		b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
 		b.WriteString("\n")
 	}
-	writeSectionHeader := func(title string, count int) {
-		line := fmt.Sprintf("%s (%d)", title, count)
-		b.WriteString(m.styles.Heading.Render(line))
+	writeSectionHeader := func(title string, count int, style lipgloss.Style) {
+		b.WriteString(style.Render(fmt.Sprintf("%s (%d)", title, count)))
 		b.WriteString("\n")
 	}
-	writeEmpty := func() {
-		b.WriteString(m.styles.Muted.Render("  (none)"))
-		b.WriteString("\n")
-	}
-
-	b.WriteString(m.styles.Muted.Render(now.Format("Monday, Jan 2, 2006")))
-	b.WriteString("\n")
-	writeDivider()
-	if len(upcoming) > 0 {
-		summary := fmt.Sprintf("Upcoming: %d task(s) in next 3 days", len(upcoming))
-		b.WriteString(m.styles.Warning.Render("  " + summary))
-		b.WriteString("\n")
-		writeDivider()
-	}
-
-	if len(overdue) == 0 && len(todayList) == 0 && len(upcoming) == 0 {
-		b.WriteString(m.styles.Success.Render("  All clear. No due tasks."))
-		b.WriteString("\n\n")
-	} else {
-		writeSection := func(title string, tasks []storage.Task, style lipgloss.Style) {
-			writeSectionHeader(title, len(tasks))
-			if len(tasks) == 0 {
-				writeEmpty()
-				b.WriteString("\n")
-				return
-			}
-			for _, t := range tasks {
-				due := formatDateTime(t.Due)
-				line := fmt.Sprintf("  • #%d %-40s  due %s", t.ID, truncateText(t.Title, 40), due)
-				b.WriteString(style.Render(line))
-				b.WriteString("\n")
-			}
+	writeTasks := func(tasks []storage.Task, style lipgloss.Style, trailing func(storage.Task) string) {
+		for _, t := range tasks {
+			line := fmt.Sprintf("  ∙ #%-3d %-*s  %s", t.ID, titleW, truncateTextWidth(t.Title, titleW), trailing(t))
+			b.WriteString(style.Render(line))
 			b.WriteString("\n")
 		}
-		if len(overdue) > 0 {
-			writeSection("Overdue", overdue, m.styles.Danger)
-		}
-		if len(todayList) > 0 {
-			writeSection("Due Today", todayList, m.styles.Accent)
-		}
-		if len(upcoming) > 0 {
-			writeSection("Upcoming (3d)", upcoming, m.styles.Muted)
-		}
+	}
+	dueTrail := func(t storage.Task) string { return "due " + formatDateTime(t.Due) }
+
+	// At-a-glance summary: color-coded counts (red/amber/warning), or all-clear.
+	var parts []string
+	if len(overdue) > 0 {
+		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("%d overdue", len(overdue))))
+	}
+	if len(todayList) > 0 {
+		parts = append(parts, m.styles.Accent.Render(fmt.Sprintf("%d due today", len(todayList))))
+	}
+	if len(upcoming) > 0 {
+		parts = append(parts, m.styles.Warning.Render(fmt.Sprintf("%d in next 3 days", len(upcoming))))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, m.styles.Success.Render("All clear, no due tasks"))
+	}
+	b.WriteString("  " + strings.Join(parts, m.styles.Muted.Render("   ∙   ")))
+	b.WriteString("\n")
+	writeDivider()
+
+	if len(overdue) > 0 {
+		writeSectionHeader("Overdue", len(overdue), m.styles.Danger)
+		writeTasks(overdue, m.styles.Danger, dueTrail)
+		b.WriteString("\n")
+	}
+	if len(todayList) > 0 {
+		writeSectionHeader("Due Today", len(todayList), m.styles.Accent)
+		writeTasks(todayList, m.styles.Accent, dueTrail)
+		b.WriteString("\n")
+	}
+	if len(upcoming) > 0 {
+		writeSectionHeader("Upcoming (next 3 days)", len(upcoming), m.styles.Warning)
+		writeTasks(upcoming, m.styles.Muted, dueTrail)
+		b.WriteString("\n")
 	}
 	if len(recurring) > 0 {
-		writeSectionHeader("Recurring Tasks", len(recurring))
-		for _, t := range recurring {
-			due := "no due"
-			if t.Due.Valid {
-				due = fmt.Sprintf("due %s", formatDateTime(t.Due))
-			}
-			next := ""
+		writeSectionHeader("Recurring", len(recurring), m.styles.Heading)
+		writeTasks(recurring, m.styles.Warning, func(t storage.Task) string {
+			s := "[" + recurrenceRuleLabel(t) + "]"
 			if nextDate, ok := nextRecurrenceDate(t); ok {
-				next = fmt.Sprintf("next %s", nextDate.Format("2006-01-02"))
+				s += " next " + nextDate.Format("2006-01-02")
 			}
-			line := fmt.Sprintf("  • #%d %-40s  [%s] %s", t.ID, truncateText(t.Title, 40), recurrenceRuleLabel(t), due)
-			if next != "" {
-				line += " • " + next
-			}
-			b.WriteString(m.styles.Warning.Render(line))
-			b.WriteString("\n")
-		}
+			return s
+		})
 		b.WriteString("\n")
 	}
-	writeDivider()
 
+	writeDivider()
 	recentAdd := m.recentlyAdded(m.recentLimit)
 	recentDone := m.recentlyDone(m.recentLimit)
-	writeSectionHeader("Recently Added", len(recentAdd))
+	writeSectionHeader("Recently Added", len(recentAdd), m.styles.Heading)
 	if len(recentAdd) == 0 {
-		writeEmpty()
+		b.WriteString(m.styles.Muted.Render("  (none)") + "\n")
 	} else {
-		for _, t := range recentAdd {
-			b.WriteString(fmt.Sprintf("  • #%d %-40s  created %s\n", t.ID, truncateText(t.Title, 40), t.CreatedAt.Format("2006-01-02")))
-		}
+		writeTasks(recentAdd, m.styles.Muted, func(t storage.Task) string { return "added " + t.CreatedAt.Format("2006-01-02") })
 	}
 	b.WriteString("\n")
-	writeSectionHeader("Recently Done", len(recentDone))
+	writeSectionHeader("Recently Done", len(recentDone), m.styles.Heading)
 	if len(recentDone) == 0 {
-		writeEmpty()
+		b.WriteString(m.styles.Muted.Render("  (none)") + "\n")
 	} else {
-		for _, t := range recentDone {
-			when := "unknown"
+		writeTasks(recentDone, m.styles.Done, func(t storage.Task) string {
 			if t.CompletedAt.Valid {
-				when = t.CompletedAt.Time.Format("2006-01-02")
+				return "done " + t.CompletedAt.Time.Format("2006-01-02")
 			}
-			b.WriteString(fmt.Sprintf("  • #%d %-40s  done %s\n", t.ID, truncateText(t.Title, 40), when))
-		}
+			return "done"
+		})
 	}
-	b.WriteString("\n")
 	m.report = b.String()
 	m.status = "Reminder report"
 	m.reportScroll = 0
+}
+
+// greetingForTime returns a time-of-day greeting for the agenda header.
+func greetingForTime(t time.Time) string {
+	switch h := t.Hour(); {
+	case h < 12:
+		return "Good morning"
+	case h < 18:
+		return "Good afternoon"
+	default:
+		return "Good evening"
+	}
 }
 
 func wrapIndex(idx, n int) int {
@@ -5549,11 +5559,21 @@ func (m Model) padStatusBar(base lipgloss.Style, content string) string {
 	if m.width <= 0 {
 		return content
 	}
-	w := lipgloss.Width(content)
-	if w >= m.width {
-		return truncateANSI(content, m.width)
+	// Target one cell short of the full width. The status bar is the bottom row;
+	// writing its last cell can leave the terminal in a pending-wrap state that
+	// scrolls the alt-screen by a line on the next repaint — which shows up as the
+	// top (header) row vanishing and the status bar appearing duplicated, most
+	// often in the gantt where navigation triggers full re-renders. The spare cell
+	// also absorbs an off-by-one from an ambiguous-width glyph in a status message.
+	target := m.width - 1
+	if target < 1 {
+		target = 1
 	}
-	return content + base.Render(strings.Repeat(" ", m.width-w))
+	w := lipgloss.Width(content)
+	if w >= target {
+		return truncateANSI(content, target)
+	}
+	return content + base.Render(strings.Repeat(" ", target-w))
 }
 
 func (m Model) fillView(body string) string {
@@ -6625,7 +6645,7 @@ func (m *Model) processSortKey(key string) bool {
 	}
 	if key == "s" {
 		m.sortBuf = "s"
-		m.status = "Sort: d (due), p (priority), t (title), c (created), o (topic), a (auto), s (state) — repeat to reverse"
+		m.status = "Sort: d (due), p (priority), t (title), c (created), o (topic), a (auto), s (state) - repeat to reverse"
 		return true
 	}
 	// reset buffer on other keys

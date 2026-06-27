@@ -249,6 +249,59 @@ func TestNoteViewNeverOverflowsWidth(t *testing.T) {
 	}
 }
 
+// TestStatusBarLeavesLastCellFree guards the alt-screen "duplicate status bar /
+// header disappears" scroll: the bottom status row must stop one cell short of
+// the full width so writing the bottom-right cell can't leave the terminal in a
+// pending-wrap state that scrolls the screen on the next repaint.
+func TestStatusBarLeavesLastCellFree(t *testing.T) {
+	for _, mode := range []func(Model) Model{
+		func(m Model) Model { return m }, // list
+		func(m Model) Model { r, _ := m.enterGanttView(); return r.(Model) },
+		func(m Model) Model { r, _ := m.enterCalendarView(); return r.(Model) },
+	} {
+		m := newTestModel(t)
+		m.width = 90
+		m.height = 16
+		m.tasks = []storage.Task{{ID: 1, Title: "Task", Status: "PENDING", CreatedAt: time.Now()}}
+		m = mode(m)
+		lines := strings.Split(m.View(), "\n")
+		last := lines[len(lines)-1]
+		if w := lipgloss.Width(last); w > m.width-1 {
+			t.Fatalf("status bar width %d should leave the last cell free (<= %d), mode=%d", w, m.width-1, m.mode)
+		}
+	}
+}
+
+// TestAgendaView confirms the first-launch agenda shows a greeting, a color-coded
+// summary, and narrow "∙" bullets (not the wide "•", which double-widths in CJK/
+// Termius), and never overflows the terminal width.
+func TestAgendaView(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 80
+	m.height = 30
+	now := time.Now()
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Overdue thing", Status: "PENDING", CreatedAt: now,
+			Due: sql.NullTime{Time: now.AddDate(0, 0, -2), Valid: true}},
+	}
+	m.refreshReport()
+
+	report := stripAnsiTest(m.renderReportHeader()) + stripAnsiTest(m.report)
+	if strings.Contains(report, "•") {
+		t.Fatalf("agenda should use the narrow ∙ bullet, not the wide •")
+	}
+	for _, want := range []string{"Good ", "overdue", "Overdue (1)", "∙ #1"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("agenda should contain %q, got:\n%s", want, report)
+		}
+	}
+	for i, l := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(l); w > m.width {
+			t.Fatalf("agenda line %d width %d exceeds %d: %q", i, w, m.width, l)
+		}
+	}
+}
+
 // TestPriorityBadge confirms priority renders as a flag (with level) rather than
 // the old "P0/P1" text, and that "none" is distinct.
 func TestPriorityBadge(t *testing.T) {
