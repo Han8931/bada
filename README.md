@@ -27,7 +27,8 @@ bada uses a framed, "taskdog-inspired" terminal UI:
   struck through, multi-selected tasks are tinted.
 - **Status-dot legend** (`●  ●  ●  ●`) and a
   **key-hint footer** showing the active shortcuts.
-- **Full-width status bar** with the current mode, sort, search, and position.
+- **Full-width status bar** with the current mode, sort, active filter/search,
+  and position.
 
 Tasks are listed directly; each task's topic appears in the table so the list
 stays flat and scan-friendly.
@@ -45,6 +46,16 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 - `:help` (or `?`) — full keybinding reference.
 - `:config` — update config and DB paths.
 
+Quick filter commands:
+
+- `:overdue` — show overdue unfinished tasks.
+- `:pending` — show pending tasks.
+- `:in-progress` / `:progress` — show in-progress tasks.
+- `:done` / `:completed` — show completed tasks.
+- `:today` — show unfinished tasks due today.
+- `:week` — show unfinished tasks due in the next 7 days.
+- `:all` / `:clear` / `:reset` — return to the original unfiltered list.
+
 
 ## Daily Use
 
@@ -55,11 +66,16 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 - Due shift: `]` / `[` (+1d/-1d).
 - Sort: `s` then `d/p/t/c/o/a/s` (due/priority/title/created/topic/auto/state).
 - `gg` / `G` bindings (jump to top / bottom)
-- Search: `/` opens a query prompt; `Enter` applies, `Esc` cancels (submit empty to clear).
+- Quick filters: use commands like `:overdue`, `:pending`, `:today`, `:week`,
+  and `:all` to clear.
+- Search: `/` opens a query prompt; `F` or `,f` opens fuzzy search;
+  `Enter` applies, `Esc` cancels (submit empty to clear).
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview.
 - Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
 - Help: `?` (or `:help`) opens the full keybinding reference.
 - Other views: `:calendar` (month grid) and `:gantt` (timeline).
+- From a filtered/searched/topic-scoped list, `Esc` or `q` returns to the
+  original list; when already on the original list, `q` quits.
 
 ## Recurrence Syntax
 

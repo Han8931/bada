@@ -2,26 +2,18 @@
 
 Tracking UI/UX work. Impact / effort tags are rough guides.
 
+## Current focus / next ideas
+
+- [ ] **Fuzzy search** — improve search with fuzzy matching and clearer result
+      highlighting.
+- [ ] **Agenda and calendar views** — improve the agenda flow and calendar view
+      readability/interaction.
+- [ ] **Gantt view improvements** — continue improving timeline readability,
+      navigation, zooming, and task/date presentation.
+- [ ] Topic Navigation bar
+
 ## Done
 
-- [x] Framed, titled panels for every view (`bada · Tasks`, Calendar, Gantt, Trash, Help)
-- [x] Colored table-header bar + Priority column in the task list
-- [x] Full-width selection bar; done/overdue/recurring row styling
-- [x] Status-dot legend + key-hint footer
-- [x] Full-width status bar with mode/sort/search/position
-- [x] `fillView` keeps the status bar pinned to the bottom line
-- [x] Dark slate (taskdog-style) theme in `config.example.toml`
-- [x] `?` opens Help
-- [x] Jira-style **Create/Edit Task** modal: centered dialog floated over the
-      list, required Title, progressive disclosure (`▸ More details`),
-      `Enter`/`^S` to save from any field, `Esc` cancels, priority stepper,
-      natural-language Due (`today`/`tomorrow`/`in 3d`) with live preview,
-      recurrence toggle, `^n`/`^p` autocomplete
-- [x] Create/Edit modal is a plain form: type directly, `tab`/`↑↓` move,
-      `Enter`/`^S` save, single `Esc` cancels (vim normal/insert modes were
-      tried then removed)
-- [x] Due as a date stepper: prefilled to today, `+`/`-` adjust the selected
-      part, `←`/`→` pick Y/M/D/H/min, `x` clears — no typing needed
 
 ## Task list readability
 

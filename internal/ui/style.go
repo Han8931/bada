@@ -80,7 +80,13 @@ func (m Model) hintBar(hints []keyHint) string {
 		cap := m.styles.KeyCap.Render(" " + h.key + " ")
 		parts = append(parts, cap+" "+m.styles.KeyLabel.Render(h.label))
 	}
-	return " " + strings.Join(parts, sep)
+	out := " " + strings.Join(parts, sep)
+	// Clip to the terminal width so a long hint row can't wrap onto a second
+	// line and push the rest of the layout off-screen.
+	if m.width > 0 && lipgloss.Width(out) > m.width {
+		out = truncateANSI(out, m.width)
+	}
+	return out
 }
 
 // stripeLine re-applies style's background across an already-rendered line so a

@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	runewidth "github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
 	"bada/internal/config"
@@ -104,6 +105,150 @@ func TestTaskListHasNoRowTint(t *testing.T) {
 	}
 }
 
+// TestTaskRowsDoNotWrapWhenNarrow guards against the phantom "duplicate row"
+// bug: on a terminal too narrow for every column, each task must clip to one
+// line instead of word-wrapping onto a second.
+func TestTaskRowsDoNotWrapWhenNarrow(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 80 // fixed columns exceed the inner width here
+	now := time.Now()
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Alpha", Status: "PENDING", CreatedAt: now},
+		{ID: 2, Title: "Bravo", Status: "PENDING", CreatedAt: now},
+	}
+	lines := strings.Split(m.renderTaskListWithHeight(-1), "\n")
+	if len(lines) != 3 { // 1 header + 2 task rows, no wrapped continuations
+		t.Fatalf("expected 3 lines (header + 2 rows), got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	inner := m.panelInnerWidth()
+	for i, l := range lines {
+		if w := lipgloss.Width(l); w > inner {
+			t.Fatalf("line %d width %d exceeds inner %d (would wrap): %q", i, w, inner, l)
+		}
+	}
+}
+
+// TestViewNeverExceedsWidth guards against chrome (e.g. the key-hint bar) being
+// wider than the terminal, which wraps and shoves the layout off-screen. No
+// rendered line may exceed m.width at a narrow size.
+func TestViewNeverExceedsWidth(t *testing.T) {
+	for _, w := range []int{80, 90, 100} {
+		m := newTestModel(t)
+		m.width = w
+		m.height = 24
+		m.tasks = []storage.Task{
+			{ID: 1, Title: "Alpha", Status: "PENDING", CreatedAt: time.Now()},
+		}
+		for i, l := range strings.Split(m.View(), "\n") {
+			if lw := lipgloss.Width(l); lw > w {
+				t.Fatalf("width %d: line %d is %d cells (over by %d): %q", w, i, lw, lw-w, l)
+			}
+		}
+	}
+}
+
+// TestCalendarDayListIsListView confirms the Enter day-detail renders the day's
+// tasks as a list view (status/priority/title/time columns) rather than a plain
+// bullet list, and that the month grid uses the narrow "∙" dot (not the wide •).
+func TestCalendarDayListIsListView(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 100
+	now := time.Now()
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Standup", Status: "PENDING",
+			Due: sql.NullTime{Time: day.Add(10 * time.Hour), Valid: true}},
+	}
+	r, _ := m.enterCalendarView()
+	m = r.(Model)
+
+	grid := m.renderCalendarGrid()
+	if strings.Contains(grid, "•") {
+		t.Fatalf("grid should use the narrow ∙ dot, not the wide •")
+	}
+
+	m.calendarDetail = true
+	detail := m.renderCalendarDayList()
+	for _, want := range []string{"Status", "Title", "Time", "10:00", "Standup"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("day detail should contain %q (list-view), got:\n%s", want, detail)
+		}
+	}
+}
+
+// TestGanttLongTaskHeaderNotGarbled guards the long-term-task header bugs: the
+// year row must use clean 2-digit years (no colliding 4-digit labels), and the
+// panel title must stay narrow (use the EA-narrow "∙" separator) so it can't overflow the
+// framed top border in a CJK terminal.
+func TestGanttLongTaskHeaderNotGarbled(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 100
+	m.height = 16
+	now := time.Now()
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Long project", Status: "PENDING", CreatedAt: now,
+			Start: sql.NullTime{Time: now, Valid: true},
+			Due:   sql.NullTime{Time: now.AddDate(0, 0, 2000), Valid: true}}, // ~6mo unit
+	}
+	m.cursor = 0
+	scale := m.timelineWindow(m.timelineNavItems())
+	if scale.unitDays < 28 {
+		t.Fatalf("a 2000-day task should zoom to a coarse unit, got %d", scale.unitDays)
+	}
+
+	yearRow := stripAnsiTest(m.timelineMonthHeader(scale, normalizeDate(now)))
+	// Collisions produced runs like "2022026"; clean 2-digit years never exceed
+	// two consecutive digits.
+	run := 0
+	for _, r := range yearRow {
+		if r >= '0' && r <= '9' {
+			run++
+			if run > 2 {
+				t.Fatalf("year header has a %d+ digit run (label collision): %q", run, yearRow)
+			}
+		} else {
+			run = 0
+		}
+	}
+
+	// The title must contain no East-Asian ambiguous-width glyphs (wide "·"/"–"),
+	// which would push the framed top border a cell over and wrap it; the narrow
+	// "∙" branding separator is used instead.
+	title := m.timelinePanelTitle()
+	for _, bad := range []string{"·", "–", "—", "↑"} {
+		if strings.Contains(title, bad) {
+			t.Fatalf("gantt title should avoid wide glyph %q, got %q", bad, title)
+		}
+	}
+	if !strings.Contains(title, "∙") {
+		t.Fatalf("gantt title should use the narrow ∙ separator, got %q", title)
+	}
+}
+
+// TestNoteViewNeverOverflowsWidth guards the "list messed up after viewing a
+// note" bug: the unframed note view must clip every line to the terminal width,
+// otherwise a long note line wraps and desyncs the frame, garbling the next view.
+func TestNoteViewNeverOverflowsWidth(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 90
+	m.height = 24
+	long := "A single very long note line that exceeds the terminal width " + strings.Repeat("x", 120)
+	m.tasks = []storage.Task{
+		{ID: 1, Title: strings.Repeat("Long title ", 12), Status: "PENDING",
+			CreatedAt: time.Now(), Notes: long},
+	}
+	r, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open note view
+	m = r.(Model)
+	if m.mode != modeNote {
+		t.Fatalf("Enter should open the note view, mode=%d", m.mode)
+	}
+	for i, l := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(l); w > m.width {
+			t.Fatalf("note line %d width %d exceeds terminal width %d (would wrap): %q", i, w, m.width, l)
+		}
+	}
+}
+
 // TestPriorityBadge confirms priority renders as a flag (with level) rather than
 // the old "P0/P1" text, and that "none" is distinct.
 func TestPriorityBadge(t *testing.T) {
@@ -175,8 +320,9 @@ func TestRepeatSortReverses(t *testing.T) {
 }
 
 // TestSortIndicatorInHeader confirms the active sort column shows a direction
-// triangle in the table header (▲ default order, ▼ reversed) and that switching
-// columns moves the marker.
+// marker in the table header (▴ default order, ▾ reversed) and that switching
+// columns moves the marker. ASCII carets are used (not Unicode triangles) so the
+// header keeps one cell per glyph in East-Asian terminals.
 func TestSortIndicatorInHeader(t *testing.T) {
 	m := newTestModel(t)
 	m.width = 140
@@ -187,22 +333,58 @@ func TestSortIndicatorInHeader(t *testing.T) {
 	}
 
 	m.applySortMode("priority")
-	if h := header(); !strings.Contains(h, "Pri▲") {
-		t.Fatalf("priority sort should mark Pri with ▲, got: %q", h)
+	if h := header(); !strings.Contains(h, "Pri▴") {
+		t.Fatalf("priority sort should mark Pri with ▴, got: %q", h)
 	}
 
 	m.applySortMode("priority") // same key again → reversed
-	if h := header(); !strings.Contains(h, "Pri▼") {
-		t.Fatalf("reversed priority sort should mark Pri with ▼, got: %q", h)
+	if h := header(); !strings.Contains(h, "Pri▾") {
+		t.Fatalf("reversed priority sort should mark Pri with ▾, got: %q", h)
 	}
 
 	m.applySortMode("due")
-	if h := header(); strings.Contains(h, "Pri▲") || strings.Contains(h, "Pri▼") {
+	if h := header(); strings.Contains(h, "Pri▴") || strings.Contains(h, "Pri▾") {
 		t.Fatalf("switching away from priority should clear its marker, got: %q", h)
 	}
-	if h := header(); !strings.Contains(h, "Due▲") {
-		t.Fatalf("due sort should mark Due with ▲, got: %q", h)
+	if h := header(); !strings.Contains(h, "Due▴") {
+		t.Fatalf("due sort should mark Due with ▴, got: %q", h)
 	}
+}
+
+// TestSortIndicatorNarrowInEastAsian guards the real bug: in a CJK terminal the
+// sort marker must stay one cell wide so the sorted header lines up with the data
+// rows instead of overflowing and wrapping. Measured with East-Asian width on,
+// where Unicode triangles (▲/▼) would be two cells.
+func TestSortIndicatorNarrowInEastAsian(t *testing.T) {
+	runewidth.DefaultCondition.EastAsianWidth = true
+	defer func() { runewidth.DefaultCondition.EastAsianWidth = false }()
+
+	m := newTestModel(t)
+	m.width = 140
+	m.tasks = []storage.Task{{ID: 1, Title: "Alpha", Status: "PENDING"}}
+	m.applySortMode("title")
+
+	lines := strings.Split(m.renderTaskListWithHeight(-1), "\n")
+	headerW := runewidth.StringWidth(stripAnsiTest(lines[0]))
+	rowW := runewidth.StringWidth(stripAnsiTest(lines[1]))
+	if headerW != rowW {
+		t.Fatalf("sorted header width %d != data row width %d under East-Asian width (marker too wide)", headerW, rowW)
+	}
+}
+
+func stripAnsiTest(s string) string {
+	var b strings.Builder
+	r := []rune(s)
+	for i := 0; i < len(r); i++ {
+		if r[i] == '\x1b' {
+			for i < len(r) && r[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		b.WriteRune(r[i])
+	}
+	return b.String()
 }
 
 // TestSortByTitle confirms `st` sorts alphabetically by title (case-insensitive).
@@ -307,6 +489,150 @@ func TestHolidayNameMatching(t *testing.T) {
 	}
 }
 
+func TestQuickFilterCommands(t *testing.T) {
+	m := newTestModel(t)
+	now := time.Now()
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Overdue", Status: "PENDING", CreatedAt: now, Due: sql.NullTime{Time: now.Add(-24 * time.Hour), Valid: true}},
+		{ID: 2, Title: "Pending", Status: "PENDING", CreatedAt: now},
+		{ID: 3, Title: "Doing", Status: "IN-PROGRESS", CreatedAt: now},
+		{ID: 4, Title: "Done", Status: "DONE", Done: true, CreatedAt: now},
+	}
+
+	m.mode = modeCommand
+	m.input.SetValue(":overdue")
+	res, _ := m.updateCommandMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(Model)
+	items := m.visibleItems()
+	if len(items) != 1 || items[0].task.ID != 1 {
+		t.Fatalf("expected only overdue task, got %+v", items)
+	}
+	if !strings.Contains(m.renderStatusBar(), "filter:") {
+		t.Fatalf("expected status bar to show active filter")
+	}
+	if !strings.Contains(m.taskPanelTitle(), "overdue") {
+		t.Fatalf("expected task panel title to show active filter")
+	}
+
+	m.mode = modeCommand
+	m.input.SetValue(":pending")
+	res, _ = m.updateCommandMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(Model)
+	items = m.visibleItems()
+	if len(items) != 2 || items[0].task.ID != 1 || items[1].task.ID != 2 {
+		t.Fatalf("expected pending tasks, got %+v", items)
+	}
+
+	res, cmd := m.updateListMode("q")
+	m = res.(Model)
+	if cmd != nil {
+		t.Fatalf("q should clear an active filter before quitting")
+	}
+	if got := len(m.visibleItems()); got != 4 {
+		t.Fatalf("expected q to return to original list, got %d tasks", got)
+	}
+	if strings.Contains(m.taskPanelTitle(), "overdue") {
+		t.Fatalf("expected filter scope to be gone after q")
+	}
+
+	m.mode = modeCommand
+	m.input.SetValue(":overdue")
+	res, _ = m.updateCommandMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(Model)
+	res, _ = m.updateListMode("esc")
+	m = res.(Model)
+	if got := len(m.visibleItems()); got != 4 {
+		t.Fatalf("expected esc to return to original list, got %d tasks", got)
+	}
+}
+
+func TestFuzzySearchKeys(t *testing.T) {
+	m := newTestModel(t)
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Fix bug", Topics: []string{"work"}, Tags: "backend", Assignee: "han", Priority: 3, Notes: "panic on save"},
+		{ID: 2, Title: "Write docs", Reporter: "mina"},
+	}
+
+	res, _ := m.updateListMode("F")
+	m = res.(Model)
+	if m.mode != modeSearch || !m.searchFuzzy {
+		t.Fatalf("expected F to open fuzzy search mode")
+	}
+	m.input.SetValue("fb")
+	res, _ = m.updateSearchMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(Model)
+	items := m.visibleItems()
+	if len(items) != 1 || items[0].task.ID != 1 {
+		t.Fatalf("expected fuzzy query to match Fix bug, got %+v", items)
+	}
+	if !strings.Contains(m.taskPanelTitle(), "fuzzy") {
+		t.Fatalf("expected fuzzy search scope in task panel title")
+	}
+
+	m.resetToOriginalListView()
+	m.searchFuzzy = true
+	m.searchQuery = "hn p3"
+	items = m.visibleItems()
+	if len(items) != 1 || items[0].task.ID != 1 {
+		t.Fatalf("expected fuzzy query to match assignee/priority fields, got %+v", items)
+	}
+	m.searchQuery = "pnc sv"
+	items = m.visibleItems()
+	if len(items) != 1 || items[0].task.ID != 1 {
+		t.Fatalf("expected fuzzy query to match notes, got %+v", items)
+	}
+
+	m.resetToOriginalListView()
+	if !m.processNavKey(",") || !m.processNavKey("f") {
+		t.Fatalf("expected ,f to open fuzzy search")
+	}
+	if m.mode != modeSearch || !m.searchFuzzy {
+		t.Fatalf("expected ,f to enter fuzzy search mode")
+	}
+	m.input.SetValue("wd")
+	out := m.View()
+	if !strings.Contains(out, "Fuzzy Find") || !strings.Contains(out, "Write docs") {
+		t.Fatalf("expected fuzzy search modal with live results, got:\n%s", out)
+	}
+}
+
+func TestCommandHistoryUsesArrowKeys(t *testing.T) {
+	m := newTestModel(t)
+
+	m.mode = modeCommand
+	m.input.SetValue(":overdue")
+	res, _ := m.updateCommandMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(Model)
+
+	m.mode = modeCommand
+	m.input.SetValue(":pending")
+	res, _ = m.updateCommandMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(Model)
+
+	res, _ = m.startCommand()
+	m = res.(Model)
+	res, _ = m.updateCommandMode("up", tea.KeyMsg{Type: tea.KeyUp})
+	m = res.(Model)
+	if got := m.input.Value(); got != ":pending" {
+		t.Fatalf("expected most recent command, got %q", got)
+	}
+	res, _ = m.updateCommandMode("up", tea.KeyMsg{Type: tea.KeyUp})
+	m = res.(Model)
+	if got := m.input.Value(); got != ":overdue" {
+		t.Fatalf("expected previous command, got %q", got)
+	}
+	res, _ = m.updateCommandMode("down", tea.KeyMsg{Type: tea.KeyDown})
+	m = res.(Model)
+	if got := m.input.Value(); got != ":pending" {
+		t.Fatalf("expected next command, got %q", got)
+	}
+	res, _ = m.updateCommandMode("down", tea.KeyMsg{Type: tea.KeyDown})
+	m = res.(Model)
+	if got := m.input.Value(); got != "" {
+		t.Fatalf("expected blank command after newest history entry, got %q", got)
+	}
+}
+
 // TestGanttNavigationSelectsTask confirms ↑/↓ move the cursor through the gantt
 // rows and that currentTask() tracks the highlighted row.
 func TestGanttNavigationSelectsTask(t *testing.T) {
@@ -328,9 +654,10 @@ func TestGanttNavigationSelectsTask(t *testing.T) {
 		t.Fatalf("after down expected task 2, got %+v ok=%v", task, ok)
 	}
 
-	// The highlighted row carries the selection marker.
+	// The highlighted row carries the selection marker (▸, a guaranteed one-cell
+	// glyph so the selected row can't overflow and wrap in CJK terminals).
 	grid := strings.Join(m.timelineGridLines(20), "\n")
-	if !strings.Contains(grid, "▌") {
+	if !strings.Contains(grid, "▸") {
 		t.Fatalf("expected a selection marker in the gantt, got:\n%s", grid)
 	}
 }
@@ -418,13 +745,79 @@ func TestGanttHeadersShowYearWhenZoomedOut(t *testing.T) {
 	top := m.timelineMonthHeader(scale, today)
 	sub := m.timelineDayHeader(scale, today)
 
-	wantYear := fmt.Sprintf("%d", scale.colStartDate(0).Year())
+	wantYear := "'" + scale.colStartDate(0).Format("06") // 2-digit, collision-proof
 	if !strings.Contains(top, wantYear) {
 		t.Fatalf("top header should show the year %s, got: %q", wantYear, top)
 	}
 	wantMonth := fmt.Sprintf("%2d ", int(scale.colStartDate(0).Month()))
 	if !strings.Contains(sub, wantMonth) {
 		t.Fatalf("second header should show numeric month %q, got: %q", wantMonth, sub)
+	}
+}
+
+// TestGanttUsesNarrowGlyphs guards against ambiguous-width block glyphs in the
+// gantt grid (▌ █ ━), which render double-width in CJK terminals and overflowed
+// the selected/long-task row into a phantom blank line. Bars/markers must use
+// the guaranteed one-cell ▸ ▬ ▮.
+func TestGanttUsesNarrowGlyphs(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 100
+	m.height = 14
+	now := time.Now()
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Short", Status: "PENDING", CreatedAt: now,
+			Due: sql.NullTime{Time: now.AddDate(0, 0, 3), Valid: true}},
+		{ID: 2, Title: "Long", Status: "PENDING", CreatedAt: now,
+			Start: sql.NullTime{Time: now, Valid: true},
+			Due:   sql.NullTime{Time: now.AddDate(0, 0, 800), Valid: true}},
+	}
+	r, _ := m.enterGanttView()
+	m = r.(Model)
+	m.cursor = 1 // select the long task
+	grid := stripAnsiTest(strings.Join(m.timelineGridLines(20), "\n"))
+	for _, bad := range []string{"▌", "█", "━"} {
+		if strings.Contains(grid, bad) {
+			t.Fatalf("gantt should not use ambiguous-width glyph %q (CJK double-width):\n%s", bad, grid)
+		}
+	}
+	if !strings.Contains(grid, "▬") || !strings.Contains(grid, "▮") {
+		t.Fatalf("gantt should use narrow ▬/▮ bars, got:\n%s", grid)
+	}
+}
+
+// TestGanttEnterOpensDetailAndReturns confirms Enter in the gantt opens the
+// selected task's detail (metadata + notes) and that closing it returns to the
+// gantt, not the list.
+func TestGanttEnterOpensDetailAndReturns(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 90
+	m.height = 20
+	now := time.Now()
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "longtask2", Status: "PENDING", CreatedAt: now, Notes: "Plan the launch",
+			Start: sql.NullTime{Time: now, Valid: true},
+			Due:   sql.NullTime{Time: now.AddDate(0, 0, 700), Valid: true}},
+	}
+	r, _ := m.enterGanttView()
+	m = r.(Model)
+	if m.mode != modeGantt {
+		t.Fatalf("expected gantt mode, got %d", m.mode)
+	}
+
+	r, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.(Model)
+	if m.mode != modeNote {
+		t.Fatalf("Enter in gantt should open the detail/note view, mode=%d", m.mode)
+	}
+	view := m.View()
+	if !strings.Contains(view, "longtask2") || !strings.Contains(view, "Plan the launch") {
+		t.Fatalf("detail should show the task title and notes, got:\n%s", view)
+	}
+
+	r, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.(Model)
+	if m.mode != modeGantt {
+		t.Fatalf("closing the detail should return to the gantt, got mode %d", m.mode)
 	}
 }
 

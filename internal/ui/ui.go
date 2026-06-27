@@ -193,56 +193,60 @@ func metaShortLabel(idx int) string {
 }
 
 type Model struct {
-	store          *storage.Store
-	cfg            config.Config
-	configPath     string
-	tasks          []storage.Task
-	trash          []storage.TrashEntry
-	cursor         int
-	navBuf         string
-	trashCursor    int
-	mode           mode
-	report         string
-	recentLimit    int
-	input          textinput.Model
-	status         string
-	filterDone     string
-	sortMode       string
-	sortReversed   bool
-	sortBuf        string
-	pendingSort    bool
-	currentTopic   string
-	searchQuery    string
-	styles         uiStyles
-	width          int
-	height         int
-	noteScroll     int
-	noteConfirm    bool
-	notePending    noteTarget
-	confirmDel     bool
-	pendingDel     *storage.Task
-	pendingBatch   []storage.Task
-	reportScroll   int
-	trashScroll    int
-	confirmTopic   bool
-	pendingTopic   string
-	trashSelected  map[int]bool
-	trashConfirm   bool
-	trashPending   []storage.TrashEntry
-	selectedTasks  map[int]bool
-	meta           *metaState
-	note           *noteState
-	renameID       int
-	renameTopic    string
-	renameIsTopic  bool
-	calendarMonth  time.Time
-	calendarDay    time.Time
-	calendarDetail bool
-	helpScroll     int
-	statsScroll    int
-	configStage    configStage
-	pendingCfgPath string
-	pendingDBPath  string
+	store             *storage.Store
+	cfg               config.Config
+	configPath        string
+	tasks             []storage.Task
+	trash             []storage.TrashEntry
+	cursor            int
+	navBuf            string
+	trashCursor       int
+	mode              mode
+	report            string
+	recentLimit       int
+	input             textinput.Model
+	status            string
+	filterDone        string
+	sortMode          string
+	sortReversed      bool
+	sortBuf           string
+	pendingSort       bool
+	currentTopic      string
+	searchQuery       string
+	searchFuzzy       bool
+	commandHistory    []string
+	commandHistoryIdx int
+	styles            uiStyles
+	width             int
+	height            int
+	noteScroll        int
+	noteReturnMode    mode // view to restore when the note/detail view closes
+	noteConfirm       bool
+	notePending       noteTarget
+	confirmDel        bool
+	pendingDel        *storage.Task
+	pendingBatch      []storage.Task
+	reportScroll      int
+	trashScroll       int
+	confirmTopic      bool
+	pendingTopic      string
+	trashSelected     map[int]bool
+	trashConfirm      bool
+	trashPending      []storage.TrashEntry
+	selectedTasks     map[int]bool
+	meta              *metaState
+	note              *noteState
+	renameID          int
+	renameTopic       string
+	renameIsTopic     bool
+	calendarMonth     time.Time
+	calendarDay       time.Time
+	calendarDetail    bool
+	helpScroll        int
+	statsScroll       int
+	configStage       configStage
+	pendingCfgPath    string
+	pendingDBPath     string
 }
 
 func Run(store *storage.Store, cfg config.Config, configPath string, firstLaunch bool) error {
@@ -258,21 +262,22 @@ func Run(store *storage.Store, cfg config.Config, configPath string, firstLaunch
 	ti.Prompt = ""
 
 	m := Model{
-		store:         store,
-		cfg:           cfg,
-		configPath:    configPath,
-		tasks:         tasks,
-		cursor:        clampCursor(0, len(tasks)),
-		trashSelected: map[int]bool{},
-		selectedTasks: map[int]bool{},
-		status:        "",
-		input:         ti,
-		mode:          modeReport,
-		recentLimit:   5,
-		filterDone:    strings.ToLower(cfg.DefaultFilter),
-		sortMode:      "auto",
-		currentTopic:  "",
-		styles:        buildStyles(cfg.Theme),
+		store:             store,
+		cfg:               cfg,
+		configPath:        configPath,
+		tasks:             tasks,
+		cursor:            clampCursor(0, len(tasks)),
+		trashSelected:     map[int]bool{},
+		selectedTasks:     map[int]bool{},
+		status:            "",
+		input:             ti,
+		mode:              modeReport,
+		recentLimit:       5,
+		filterDone:        normalizeQuickFilter(cfg.DefaultFilter),
+		sortMode:          "auto",
+		currentTopic:      "",
+		commandHistoryIdx: -1,
+		styles:            buildStyles(cfg.Theme),
 	}
 	m.sortTasks()
 	m.refreshReport()
@@ -367,6 +372,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.updateListMode(key)
 }
 
+func (m Model) listViewScopedActive() bool {
+	return m.searchActive() || m.quickFilterActive() || m.currentTopic != ""
+}
+
+func (m *Model) resetToOriginalListView() {
+	m.searchQuery = ""
+	m.searchFuzzy = false
+	m.filterDone = "all"
+	m.currentTopic = ""
+	m.cursor = clampCursor(0, len(m.visibleItems()))
+	m.status = "Back to original list"
+}
+
 func (m Model) updateAddMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case m.cfg.Keys.Cancel:
@@ -410,17 +428,23 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 	m = m.flushPendingSort(key)
 	vis := m.visibleItems()
 	switch key {
-	case "ctrl+c", m.cfg.Keys.Quit:
+	case "ctrl+c":
+		return m, tea.Quit
+	case m.cfg.Keys.Quit:
+		if m.listViewScopedActive() {
+			m.resetToOriginalListView()
+			return m, nil
+		}
 		return m, tea.Quit
 	case ":":
 		return m.startCommand()
 	case m.cfg.Keys.Search, "/":
 		return m.startSearch()
+	case "F":
+		return m.startFuzzySearch()
 	case m.cfg.Keys.Cancel, "esc":
-		if m.searchActive() {
-			m.searchQuery = ""
-			m.cursor = clampCursor(0, len(m.visibleItems()))
-			m.status = "Search cleared"
+		if m.listViewScopedActive() {
+			m.resetToOriginalListView()
 		}
 		return m, nil
 	case "h", "left":
@@ -587,6 +611,10 @@ func (m Model) View() string {
 		return m.fillView(m.renderMetaModalView())
 	}
 
+	if m.mode == modeSearch && m.searchFuzzy {
+		return m.fillView(m.renderFuzzySearchModalView())
+	}
+
 	if m.mode == modeNote {
 		b.WriteString(m.renderNoteView())
 		b.WriteString("\n\n")
@@ -682,7 +710,7 @@ func (m Model) View() string {
 
 	// Top: the enlarged task list. Then the key-hint line sits just above the
 	// Detail pane, which is pinned to the bottom.
-	top := m.panel("bada · Tasks", body)
+	top := m.panel(m.taskPanelTitle(), body)
 
 	if m.height <= 0 {
 		out := top
@@ -701,12 +729,32 @@ func (m Model) View() string {
 }
 
 // listHints returns the key-hint chips shown beneath the task list.
+func (m Model) taskPanelTitle() string {
+	title := "bada ∙ Tasks"
+	if m.quickFilterActive() {
+		title += " · " + m.filterDone
+	}
+	if m.searchActive() {
+		if m.searchFuzzy {
+			title += " · fuzzy"
+		} else {
+			title += " · search"
+		}
+	}
+	return title
+}
+
 func (m Model) listHints() []keyHint {
 	k := m.cfg.Keys
+	quitLabel := "quit"
+	if m.listViewScopedActive() {
+		quitLabel = "back"
+	}
 	return []keyHint{
-		{k.Quit, "quit"},
+		{k.Quit, quitLabel},
 		{k.Add, "add"},
 		{k.Search, "search"},
+		{"F/,f", "fuzzy"},
 		{k.Detail, "detail"},
 		{k.Edit, "edit"},
 		{"T", "trash"},
@@ -754,12 +802,16 @@ func (m Model) renderFooterPanel() string {
 		b.WriteString(m.input.View())
 		return b.String()
 	case modeSearch:
-		b.WriteString(m.styles.Heading.Render("Search: "))
+		label := "Search: "
+		if m.searchFuzzy {
+			label = "Fuzzy search: "
+		}
+		b.WriteString(m.styles.Heading.Render(label))
 		b.WriteString(m.input.View())
 		return b.String()
 	default:
 		// List view: show the current task's details in its own framed pane.
-		return m.panel("bada · Detail", strings.TrimRight(m.renderMetadataPanel(), "\n"))
+		return m.panel("bada ∙ Detail", strings.TrimRight(m.renderMetadataPanel(), "\n"))
 	}
 }
 
@@ -1139,6 +1191,12 @@ func (m Model) updateGanttMode(key string) (tea.Model, tea.Cmd) {
 		m.mode = modeList
 		m.status = "Gantt closed"
 		return m, nil
+	case m.cfg.Keys.Confirm, "enter":
+		if _, ok := m.currentTask(); !ok {
+			m.status = "No task selected"
+			return m, nil
+		}
+		return m.startNoteView() // detail + notes; closes back to the gantt
 	case m.cfg.Keys.Up, "up":
 		if m.cursor > 0 {
 			m.cursor = clampCursor(m.cursor-1, len(vis))
@@ -1203,7 +1261,7 @@ func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case m.cfg.Keys.Cancel, m.cfg.Keys.Confirm, "esc", m.cfg.Keys.Quit, "q", "enter":
-		m.mode = modeList
+		m.mode = m.noteReturnMode // back to the view that opened it (list or gantt)
 		m.note = nil
 		m.status = "Notes closed"
 		return m, nil
@@ -1376,10 +1434,10 @@ func (m Model) calendarFooter() string {
 func (m Model) renderCalendarView() string {
 	var title, body string
 	if m.calendarDetail {
-		title = "bada · Calendar — " + m.calendarDay.Format("Mon, Jan 2, 2006")
+		title = "bada ∙ Calendar ∙ " + m.calendarDay.Format("Mon, Jan 2, 2006")
 		body = m.renderCalendarDayList()
 	} else {
-		title = "bada · Calendar — " + m.calendarMonth.Format("January 2006")
+		title = "bada ∙ Calendar ∙ " + m.calendarMonth.Format("January 2006")
 		body = m.renderCalendarGrid()
 	}
 	return m.panel(title, body) + "\n" + m.calendarFooter()
@@ -1403,8 +1461,12 @@ func (m Model) renderCalendarGrid() string {
 	maxTasks := 2
 	dayNames := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 	var b strings.Builder
-	for _, name := range dayNames {
-		b.WriteString(padRightWidth(name, cellWidth))
+	for i, name := range dayNames {
+		style := m.styles.Heading
+		if i >= 5 { // Sat/Sun
+			style = m.styles.Danger
+		}
+		b.WriteString(style.Render(padRightWidth(name, cellWidth)))
 	}
 	b.WriteString("\n")
 	for weekIndex, week := range weeks {
@@ -1441,11 +1503,21 @@ func (m Model) renderCalendarCellLines(day time.Time, width, height, maxTasks in
 		headerStyle = m.styles.Border
 		taskStyle = lipgloss.NewStyle()
 	}
-	if isSameDate(day, time.Now()) {
+	isToday := isSameDate(day, time.Now())
+	isSelected := isSameDate(day, m.calendarDay)
+	// Weekends and configured holidays tint the date number (unless the cell is
+	// already highlighted as today/selected).
+	if inMonth && !isToday && !isSelected {
+		_, holiday := m.holidayName(day)
+		if holiday || day.Weekday() == time.Saturday || day.Weekday() == time.Sunday {
+			headerStyle = m.styles.Danger
+		}
+	}
+	if isToday {
 		headerStyle = m.styles.Warning
 		taskStyle = m.styles.Warning
 	}
-	if isSameDate(day, m.calendarDay) {
+	if isSelected {
 		headerStyle = m.styles.Selection
 		taskStyle = m.styles.Selection
 	}
@@ -1461,9 +1533,18 @@ func (m Model) renderCalendarCellLines(day time.Time, width, height, maxTasks in
 	if showCount > maxTasks {
 		showCount = maxTasks
 	}
+	highlight := isToday || isSelected
 	for i := 0; i < showCount; i++ {
-		text := "• " + truncateTextWidth(tasks[i].Title, width-2)
-		lines = append(lines, taskStyle.Render(padRightWidth(text, width)))
+		// "∙" (narrow, one cell even in CJK terminals) instead of "•". On plain
+		// in-month cells the dot is colored by task state; highlighted cells
+		// recolor the whole line, so a plain dot is used there.
+		body := padRightWidth("∙ "+truncateTextWidth(tasks[i].Title, width-2), width)
+		if inMonth && !highlight {
+			dot := m.calendarTaskAccent(tasks[i]).Render("∙")
+			lines = append(lines, dot+taskStyle.Render(strings.TrimPrefix(body, "∙")))
+		} else {
+			lines = append(lines, taskStyle.Render(body))
+		}
 	}
 
 	if len(tasks) > maxTasks {
@@ -1482,22 +1563,59 @@ func (m Model) renderCalendarCellLines(day time.Time, width, height, maxTasks in
 	return lines
 }
 
+// calendarTaskAccent colors a day-cell task dot by state: overdue red,
+// in-progress green, otherwise the accent color.
+func (m Model) calendarTaskAccent(t storage.Task) lipgloss.Style {
+	switch {
+	case isOverdue(t):
+		return m.styles.Danger
+	case t.Status == "IN-PROGRESS":
+		return m.styles.Success
+	default:
+		return m.styles.Accent
+	}
+}
+
+// renderCalendarDayList shows the selected day's tasks as a compact list view —
+// a status badge, priority flag, title, due time, and tags per row — mirroring
+// the main task table so the day detail feels like the list.
 func (m Model) renderCalendarDayList() string {
 	tasks := m.tasksForDay(m.calendarDay)
 	if len(tasks) == 0 {
-		return m.styles.Muted.Render("(no tasks)")
+		return m.styles.Muted.Render("  (no tasks for this day)")
 	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		di, dj := tasks[i].Due, tasks[j].Due
+		if di.Valid && dj.Valid && !di.Time.Equal(dj.Time) {
+			return di.Time.Before(dj.Time)
+		}
+		if di.Valid != dj.Valid {
+			return di.Valid
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
+
+	inner := m.panelInnerWidth()
+	const statusW, timeW, tagsW = 11, 6, 14
+	titleW := clampInt(inner-statusW-timeW-tagsW-12, 12, 60)
+
 	var b strings.Builder
+	header := fmt.Sprintf("  %-*s %-4s %-*s %-*s %-*s",
+		statusW, "Status", "Pri", titleW, "Title", timeW, "Time", tagsW, "Tags")
+	b.WriteString(m.styles.TableHeader.Render(padRightWidth(header, inner)))
+	b.WriteString("\n")
 	for _, t := range tasks {
-		due := "no due"
+		tm := "—"
 		if t.Due.Valid {
-			due = formatDateTime(t.Due)
+			tm = t.Due.Time.Format("15:04")
 		}
-		line := fmt.Sprintf("  • #%d %-40s  %s", t.ID, truncateText(t.Title, 40), due)
-		if rec := recurrenceSummary(t); rec != "" {
-			line += " [" + rec + "]"
-		}
-		b.WriteString(line)
+		row := fmt.Sprintf("  %s %s %-*s %-*s %-*s",
+			m.statusField(t, statusW, true),
+			m.priorityField(t.Priority, true),
+			titleW, truncateTextWidth(t.Title, titleW),
+			timeW, tm,
+			tagsW, truncateTextWidth(emptyDash(t.Tags), tagsW))
+		b.WriteString(row)
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -1706,7 +1824,7 @@ func (m Model) renderHelpView() string {
 	} else {
 		body = m.helpContent()
 	}
-	return m.panel("bada · Help", body) + "\n" + footer
+	return m.panel("bada ∙ Help", body) + "\n" + footer
 }
 
 func (m Model) helpContent() string {
@@ -2070,7 +2188,7 @@ func (m Model) renderStatsView() string {
 	} else {
 		body = m.statsContent()
 	}
-	return m.panel("bada · Stats", body) + "\n" + footer
+	return m.panel("bada ∙ Stats", body) + "\n" + footer
 }
 
 func (m Model) renderTrashView() string {
@@ -2088,7 +2206,7 @@ func (m Model) renderTrashView() string {
 	} else {
 		body = m.renderTrashContent()
 	}
-	return m.panel("bada · Trash", body) + "\n" + footer
+	return m.panel("bada ∙ Trash", body) + "\n" + footer
 }
 
 func (m Model) trashViewFooter() string {
@@ -2144,6 +2262,12 @@ func (m Model) renderTrashBody(maxLines int) string {
 func (m Model) trashRows() []string {
 	inner := m.panelInnerWidth()
 	full := func(style lipgloss.Style, s string) string {
+		// Clip over-wide rows to the panel width first; otherwise lipgloss's
+		// Width() word-wraps them onto a second line, which reads as a phantom
+		// duplicate row on terminals too narrow for every column.
+		if lipgloss.Width(s) > inner {
+			s = truncateANSI(s, inner)
+		}
 		return style.Width(inner).MaxWidth(inner).Render(s)
 	}
 	rows := make([]string, 0, len(m.trash))
@@ -2197,6 +2321,7 @@ func (m *Model) adjustTrashScroll() {
 func (m Model) ganttFooter() string {
 	return m.hintBar([]keyHint{
 		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "move"},
+		{"enter", "detail"},
 		{m.cfg.Keys.Cancel, "close"},
 		{m.cfg.Keys.Quit, "quit"},
 	})
@@ -2444,9 +2569,12 @@ func (m Model) timelinePanelTitle() string {
 	end := scale.colEndDate(scale.colCount - 1)
 	unit := ""
 	if scale.unitDays > 1 {
-		unit = " · " + scale.unitLabel()
+		unit = "  (" + scale.unitLabel() + ")"
 	}
-	return fmt.Sprintf("bada · Timeline · %s–%s%s · ↑ due", start.Format("Jan 2"), end.Format("Jan 2"), unit)
+	// Keep only the branding "·" (one ambiguous-width cell, like every panel
+	// title); the rest stays ASCII so a long title can't overflow the framed top
+	// border in CJK terminals, where "·"/"↑"/"–" render double-width.
+	return fmt.Sprintf("bada ∙ Timeline  %s-%s%s", start.Format("Jan 2"), end.Format("Jan 2"), unit)
 }
 
 // ganttColCellBg paints date backgrounds for a Gantt cell.
@@ -2529,8 +2657,9 @@ func (m Model) timelineMonthHeader(scale timelineScale, today time.Time) string 
 	// Zoomed in (day/week), the top row labels months at month boundaries.
 	// Zoomed out (month or coarser), it labels years at year boundaries so a long
 	// timeline stays oriented instead of cramming "JanFeb…" with no anchor. Years
-	// print 4-digit while sparse, but 2-digit ("'26") at year+ zoom where every
-	// column is a new year and 4 digits would collide.
+	// always print 2-digit ("'26", three cells) so they fit a column exactly and
+	// can't collide even when a year boundary lands on adjacent columns (which
+	// happens at quarter/half-year units starting late in a year).
 	coarse := scale.unitDays >= 28
 	prevKey := -1
 	for i := 0; i < n; i++ {
@@ -2539,11 +2668,7 @@ func (m Model) timelineMonthHeader(scale timelineScale, today time.Time) string 
 		text := d.Format("Jan")
 		if coarse {
 			key = d.Year()
-			if scale.unitDays >= 365 {
-				text = "'" + d.Format("06")
-			} else {
-				text = d.Format("2006")
-			}
+			text = "'" + d.Format("06")
 		}
 		if i == 0 || key != prevKey {
 			label := []rune(text)
@@ -2555,10 +2680,12 @@ func (m Model) timelineMonthHeader(scale timelineScale, today time.Time) string 
 		prevKey = key
 	}
 	todayCol := scale.colOf(today)
-	// Mark today with a dot above its column when the slot is free.
+	// Mark today with a downward triangle above its column when the slot is free.
+	// A small triangle (▾) is one cell wide even in CJK terminals, unlike • which
+	// is ambiguous-width and would shift the header.
 	if todayCol >= 0 && todayCol < n {
 		if c := todayCol*timelineCellW + 1; cells[c] == ' ' {
-			cells[c] = '•'
+			cells[c] = '▾'
 		}
 	}
 	var b strings.Builder
@@ -2637,7 +2764,10 @@ func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.
 	hasDue := task.Due.Valid
 	marker := "  "
 	if selected {
-		marker = "▌ "
+		// "▸" (right triangle, guaranteed one cell) instead of "▌": the half-block
+		// is East-Asian ambiguous and renders double-width in CJK terminals, which
+		// overflowed the selected row and wrapped it into a phantom blank line.
+		marker = "▸ "
 	}
 	label := fmt.Sprintf("%s%-3d %s", marker, task.ID, truncateText(task.Title, scale.leftW-7))
 	dueCol := -1
@@ -2649,19 +2779,21 @@ func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.
 	for i := 0; i < scale.colCount; i++ {
 		cs := scale.colStartDate(i)
 		ce := scale.colEndDate(i)
-		content := " · "
+		content := " ∙ "
 		fg := m.styles.Muted
 		// A wide column is "in plan" when it overlaps the task's start→due span.
 		inPlan := hasDue && !it.start.After(ce) && !it.due.Before(cs)
 		if inPlan {
-			content = "━━━"
+			// ▬/▮ are guaranteed one cell wide; the heavy "━"/full-block "█" are
+			// East-Asian ambiguous and double up in CJK terminals.
+			content = "▬▬▬"
 			fg = m.styles.Border
 			if task.Status == "IN-PROGRESS" {
 				fg = m.styles.Success
 			}
 		}
 		if i == dueCol {
-			content = "███"
+			content = "▮▮▮"
 			fg = m.styles.Accent.Bold(true)
 			bandColor := m.cfg.Theme.Accent
 			if isOverdue(task) {
@@ -2695,10 +2827,10 @@ func (m Model) timelineLegend() string {
 		todayCol = todayCol.Background(lipgloss.Color(c))
 	}
 	parts := []string{
-		m.styles.Border.Render("━━") + m.styles.Muted.Render(" planned"),
-		m.styles.Success.Render("━━") + m.styles.Muted.Render(" in-progress"),
-		m.styles.Accent.Render("██") + m.styles.Muted.Render(" due"),
-		m.styles.Danger.Render("██") + m.styles.Muted.Render(" overdue"),
+		m.styles.Border.Render("▬▬") + m.styles.Muted.Render(" planned"),
+		m.styles.Success.Render("▬▬") + m.styles.Muted.Render(" in-progress"),
+		m.styles.Accent.Render("▮▮") + m.styles.Muted.Render(" due"),
+		m.styles.Danger.Render("▮▮") + m.styles.Muted.Render(" overdue"),
 		weekend.Render("  ") + m.styles.Muted.Render(" weekend"),
 		todayCol.Render("│ ") + m.styles.Muted.Render(" today"),
 	}
@@ -2735,38 +2867,52 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 	}
 
 	full := func(style lipgloss.Style, s string) string {
+		// Clip over-wide rows to the panel width first; otherwise lipgloss's
+		// Width() word-wraps them onto a second line, which reads as a phantom
+		// duplicate row on terminals too narrow for every column.
+		if lipgloss.Width(s) > inner {
+			s = truncateANSI(s, inner)
+		}
 		return style.Width(inner).MaxWidth(inner).Render(s)
 	}
 
 	lines := make([]string, 0)
-	if m.searchActive() {
-		search := fmt.Sprintf(" Search: %q (%d result(s))", m.searchQuery, len(items))
-		lines = append(lines, full(m.styles.Accent, search))
-	}
-	// sortCol appends a direction triangle to the column whose sort mode is
-	// active (▲ default order, ▼ reversed), mirroring the status-bar arrow.
-	sortMark := "▲"
+	// Keep the table header as the first body row in every list state. Previously
+	// filter/search banners were inserted above it, which made the header jump
+	// between terminal rows and could leave a stale duplicate during incremental
+	// screen refreshes. Active filter/search state is shown in the panel title and
+	// status bar instead.
+	// sortCol appends a direction marker to the column whose sort mode is active
+	// (▴ default order, ▾ reversed), mirroring the status-bar arrow. Small
+	// triangles (U+25B4/25BE) are used instead of the large ▲/▼ because the large
+	// ones are East-Asian *ambiguous* width — a CJK terminal renders them as two
+	// cells while lipgloss/Go padding count one, overflowing the header row and
+	// wrapping it onto a phantom second line. The small triangles are always one
+	// cell wide.
+	sortMark := "▴"
 	if m.sortReversed {
-		sortMark = "▼"
+		sortMark = "▾"
 	}
-	sortCol := func(label, mode string) string {
+	sortCol := func(label, mode string, width int) string {
 		if m.sortMode == mode {
-			return label + sortMark
+			label += sortMark
 		}
-		return label
+		return padRightWidth(truncateTextWidth(label, width), width)
 	}
-	header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-4s %-*s %-*s %-*s %-*s %-*s",
-		titleW, sortCol("Title", "title"),
-		statusW, sortCol("Status", "state"),
-		topicW, sortCol("Topic", "topic"),
-		assigneeW, "Assign",
-		reporterW, "Report",
-		sortCol("Pri", "priority"),
-		dateW, "Due-in",
-		dateW, sortCol("Due", "due"),
-		dateW, "End",
-		recurrenceW, "Recur",
-		tagsW, "Tags")
+	headerCols := []string{
+		sortCol("Title", "title", titleW),
+		sortCol("Status", "state", statusW),
+		sortCol("Topic", "topic", topicW),
+		padRightWidth("Assign", assigneeW),
+		padRightWidth("Report", reporterW),
+		sortCol("Pri", "priority", 4),
+		padRightWidth("Due-in", dateW),
+		sortCol("Due", "due", dateW),
+		padRightWidth("End", dateW),
+		padRightWidth("Recur", recurrenceW),
+		padRightWidth("Tags", tagsW),
+	}
+	header := "  " + strings.Join(headerCols, " ")
 	lines = append(lines, full(m.styles.TableHeader, header))
 
 	itemLines := make([]string, 0, len(items))
@@ -2904,6 +3050,7 @@ func (m Model) startNoteView() (tea.Model, tea.Cmd) {
 	}
 	m.note = &noteState{target: target, body: notes}
 	m.noteScroll = 0
+	m.noteReturnMode = m.mode // return here (e.g. the gantt) when the note closes
 	m.mode = modeNote
 	m.status = fmt.Sprintf("Notes: %s", target.label())
 	return m, nil
@@ -4187,6 +4334,140 @@ func (ms metaState) valueOf(idx int) string {
 
 // renderMetaModalView draws the Create/Edit Task dialog floated over the task
 // list, with list rows still visible above and below.
+func (m Model) renderFuzzySearchModalView() string {
+	inner := m.panelInnerWidth()
+	listMax := 0
+	if m.height > 0 {
+		listMax = (m.height - 1) - 2
+		if listMax < 1 {
+			listMax = 1
+		}
+	}
+	var bodyLines []string
+	if m.height > 0 {
+		bodyLines = strings.Split(m.renderTaskListWithHeight(listMax), "\n")
+		for len(bodyLines) < listMax {
+			bodyLines = append(bodyLines, "")
+		}
+		if len(bodyLines) > listMax {
+			bodyLines = bodyLines[:listMax]
+		}
+	} else {
+		bodyLines = strings.Split(m.renderTaskList(), "\n")
+	}
+
+	box := m.renderFuzzySearchModal()
+	boxLines := strings.Split(box, "\n")
+	boxW := 0
+	for _, l := range boxLines {
+		if w := lipgloss.Width(l); w > boxW {
+			boxW = w
+		}
+	}
+	rows := len(bodyLines)
+	// Telescope-style: float near the upper middle so results open below input.
+	top := rows / 5
+	if top < 0 {
+		top = 0
+	}
+	left := (inner - boxW) / 2
+	if left < 0 {
+		left = 0
+	}
+	for i, bl := range boxLines {
+		r := top + i
+		if r < 0 || r >= rows {
+			continue
+		}
+		w := lipgloss.Width(bl)
+		line := strings.Repeat(" ", left) + bl
+		if pad := inner - left - w; pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		bodyLines[r] = line
+	}
+	return m.panel(m.taskPanelTitle(), strings.Join(bodyLines, "\n"))
+}
+
+func (m Model) renderFuzzySearchModal() string {
+	boxInner := 62
+	if max := m.panelInnerWidth() - 6; boxInner > max {
+		boxInner = max
+	}
+	if boxInner < 32 {
+		boxInner = 32
+	}
+
+	query := strings.TrimSpace(m.input.Value())
+	candidates := m.applyQuickFilterToItems(m.defaultVisibleItems())
+	matches := filterItemsByQuery(candidates, query, true)
+	if query == "" {
+		matches = candidates
+	}
+	maxResults := 8
+	if len(matches) < maxResults {
+		maxResults = len(matches)
+	}
+
+	lines := []string{
+		m.styles.Accent.Render(padRightWidth("› "+m.input.View(), boxInner)),
+		m.styles.Muted.Render(padRightWidth(fmt.Sprintf("%d result(s) · Enter apply · Esc cancel", len(matches)), boxInner)),
+	}
+	if maxResults == 0 {
+		lines = append(lines, m.styles.Muted.Render(padRightWidth("No matches", boxInner)))
+	} else {
+		for i := 0; i < maxResults; i++ {
+			it := matches[i]
+			if it.kind != itemTask {
+				continue
+			}
+			status := taskStatusLabel(it.task)
+			line := fmt.Sprintf("#%-4d %-12s %s", it.task.ID, status, truncateText(it.task.Title, boxInner-19))
+			meta := "      " + truncateText(fuzzyResultMeta(it.task), boxInner-6)
+			if i == 0 {
+				lines = append(lines, m.styles.Selection.Render(padRightWidth(line, boxInner)))
+				lines = append(lines, m.styles.Selection.Render(padRightWidth(meta, boxInner)))
+			} else {
+				lines = append(lines, padRightWidth(line, boxInner))
+				lines = append(lines, m.styles.Muted.Render(padRightWidth(meta, boxInner)))
+			}
+		}
+	}
+	return m.modalFrame("Fuzzy Find", lines, boxInner)
+}
+
+func fuzzyResultMeta(t storage.Task) string {
+	parts := make([]string, 0, 8)
+	if len(t.Topics) > 0 {
+		parts = append(parts, "topic:"+strings.Join(t.Topics, ","))
+	}
+	if strings.TrimSpace(t.Tags) != "" {
+		parts = append(parts, "tags:"+t.Tags)
+	}
+	if strings.TrimSpace(t.Assignee) != "" {
+		parts = append(parts, "assignee:"+t.Assignee)
+	}
+	if strings.TrimSpace(t.Reporter) != "" {
+		parts = append(parts, "reporter:"+t.Reporter)
+	}
+	if t.Priority > 0 {
+		parts = append(parts, fmt.Sprintf("p%d", t.Priority))
+	}
+	if t.Due.Valid {
+		parts = append(parts, "due:"+formatDateTime(t.Due))
+	}
+	if t.Recurring {
+		parts = append(parts, "recurring")
+	}
+	if strings.TrimSpace(t.Notes) != "" {
+		parts = append(parts, "notes:"+strings.TrimSpace(t.Notes))
+	}
+	if len(parts) == 0 {
+		return "—"
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (m Model) renderMetaModalView() string {
 	inner := m.panelInnerWidth()
 
@@ -4241,7 +4522,7 @@ func (m Model) renderMetaModalView() string {
 		bodyLines[r] = line
 	}
 
-	return m.panel("bada · Tasks", strings.Join(bodyLines, "\n"))
+	return m.panel("bada ∙ Tasks", strings.Join(bodyLines, "\n"))
 }
 
 // renderCreateModal builds the bordered dialog box (title, fields, toggle,
@@ -5235,15 +5516,25 @@ func (m Model) renderStatusBar() string {
 		if total > 0 {
 			cursor = clampCursor(m.cursor, total) + 1
 		}
-		sortArrow := "↑"
+		// Small triangles (not ↑/↓, which are East-Asian ambiguous width and
+		// render as two cells in a CJK terminal) keep the status bar from
+		// overflowing.
+		sortArrow := "▴"
 		if m.sortReversed {
-			sortArrow = "↓"
+			sortArrow = "▾"
 		}
 		content = head + sp +
 			seg("sort:", th.Muted) + seg(m.sortMode+sortArrow, th.Accent) + sp +
 			seg(fmt.Sprintf("%d/%d", cursor, total), th.Success)
+		if m.quickFilterActive() {
+			content += sp + seg("filter:", th.Muted) + seg(m.filterDone, th.Warning)
+		}
 		if m.searchActive() {
-			content += sp + seg(fmt.Sprintf("search:%q", m.searchQuery), th.Warning)
+			label := "search"
+			if m.searchFuzzy {
+				label = "fuzzy"
+			}
+			content += sp + seg(fmt.Sprintf("%s:%q", label, m.searchQuery), th.Warning)
 		}
 		if strings.TrimSpace(m.status) != "" {
 			content += sp + seg(m.status, th.Heading)
@@ -5268,20 +5559,42 @@ func (m Model) padStatusBar(base lipgloss.Style, content string) string {
 func (m Model) fillView(body string) string {
 	statusBar := m.renderStatusBar()
 	if m.height <= 0 {
-		return body + "\n" + statusBar
+		return clearLineEnds(body + "\n" + statusBar)
 	}
 	target := m.height - 1
 	if target < 1 {
 		target = 1
 	}
 	lines := strings.Split(body, "\n")
+	// Clip every line to the terminal width. Framed views already fit, but the
+	// unframed note view emits full-width/long lines; without this a line wider
+	// than the terminal wraps, which desyncs the frame and garbles the next view
+	// (e.g. the list) on return.
+	if m.width > 0 {
+		for i, l := range lines {
+			if lipgloss.Width(l) > m.width {
+				lines[i] = truncateANSI(l, m.width)
+			}
+		}
+	}
 	for len(lines) < target {
 		lines = append(lines, "")
 	}
 	if len(lines) > target {
 		lines = lines[:target]
 	}
-	return strings.Join(lines, "\n") + "\n" + statusBar
+	return clearLineEnds(strings.Join(lines, "\n") + "\n" + statusBar)
+}
+
+func clearLineEnds(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if strings.HasSuffix(line, "\x1b[K") {
+			continue
+		}
+		lines[i] = line + "\x1b[K"
+	}
+	return strings.Join(lines, "\n")
 }
 
 func countLines(s string) int {
@@ -5338,7 +5651,8 @@ func (m Model) startCommand() (tea.Model, tea.Cmd) {
 	m.input.SetValue("")
 	m.input.Placeholder = ""
 	m.input.Focus()
-	m.status = "Command: type a command (tab to autocomplete), Enter to run, Esc to cancel"
+	m.commandHistoryIdx = len(m.commandHistory)
+	m.status = "Command: type a command (tab to autocomplete), ↑/↓ history, Enter to run, Esc to cancel"
 	return m, nil
 }
 
@@ -5357,10 +5671,21 @@ func (m Model) startConfig() (Model, tea.Cmd) {
 
 func (m Model) startSearch() (tea.Model, tea.Cmd) {
 	m.mode = modeSearch
+	m.searchFuzzy = false
 	m.input.SetValue(m.searchQuery)
 	m.input.Placeholder = "Search tasks"
 	m.input.Focus()
 	m.status = "Search: type a query, Enter to apply, Esc to cancel"
+	return m, nil
+}
+
+func (m Model) startFuzzySearch() (tea.Model, tea.Cmd) {
+	m.mode = modeSearch
+	m.searchFuzzy = true
+	m.input.SetValue(m.searchQuery)
+	m.input.Placeholder = "Fuzzy search tasks"
+	m.input.Focus()
+	m.status = "Fuzzy search: type a query, Enter to apply, Esc to cancel"
 	return m, nil
 }
 
@@ -5375,8 +5700,15 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		m.input.SetValue(completeCommand(m.input.Value()))
 		m.input.CursorEnd()
 		return m, nil
+	case m.cfg.Keys.Up, "up":
+		m.recallCommandHistory(-1)
+		return m, nil
+	case m.cfg.Keys.Down, "down":
+		m.recallCommandHistory(1)
+		return m, nil
 	case m.cfg.Keys.Confirm, "enter":
 		cmd := strings.TrimSpace(m.input.Value())
+		m.pushCommandHistory(cmd)
 		cmdLower := strings.TrimPrefix(strings.ToLower(cmd), ":")
 		switch cmdLower {
 		case "q", "quit", "wq", "x":
@@ -5393,6 +5725,8 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			return m.enterStatsView()
 		case "config":
 			return m.startConfig()
+		case "all", "clear", "reset", "overdue", "pending", "done", "completed", "progress", "in-progress", "today", "week":
+			m.applyQuickFilter(cmdLower)
 		default:
 			m.status = fmt.Sprintf("unknown command: %s", cmd)
 		}
@@ -5406,6 +5740,43 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 	}
 }
 
+func (m *Model) pushCommandHistory(cmd string) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return
+	}
+	if len(m.commandHistory) > 0 && m.commandHistory[len(m.commandHistory)-1] == cmd {
+		m.commandHistoryIdx = len(m.commandHistory)
+		return
+	}
+	m.commandHistory = append(m.commandHistory, cmd)
+	if len(m.commandHistory) > 100 {
+		m.commandHistory = m.commandHistory[len(m.commandHistory)-100:]
+	}
+	m.commandHistoryIdx = len(m.commandHistory)
+}
+
+func (m *Model) recallCommandHistory(delta int) {
+	if len(m.commandHistory) == 0 {
+		return
+	}
+	if m.commandHistoryIdx < 0 || m.commandHistoryIdx > len(m.commandHistory) {
+		m.commandHistoryIdx = len(m.commandHistory)
+	}
+	m.commandHistoryIdx += delta
+	if m.commandHistoryIdx < 0 {
+		m.commandHistoryIdx = 0
+	}
+	if m.commandHistoryIdx >= len(m.commandHistory) {
+		m.commandHistoryIdx = len(m.commandHistory)
+		m.input.SetValue("")
+		m.input.CursorEnd()
+		return
+	}
+	m.input.SetValue(m.commandHistory[m.commandHistoryIdx])
+	m.input.CursorEnd()
+}
+
 func completeCommand(input string) string {
 	raw := strings.TrimSpace(input)
 	prefix := ""
@@ -5414,14 +5785,8 @@ func completeCommand(input string) string {
 		raw = strings.TrimPrefix(raw, ":")
 	}
 	cmd := strings.ToLower(raw)
-	commands := []string{"agenda", "calendar", "config", "gantt", "help", "quit", "stats"}
+	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "help", "in-progress", "overdue", "pending", "quit", "stats", "today", "week"}
 	if cmd == "" {
-		return prefix + commands[0]
-	}
-	if cmd == commands[0] {
-		return prefix + commands[1]
-	}
-	if cmd == commands[1] {
 		return prefix + commands[0]
 	}
 	var matches []string
@@ -5484,8 +5849,13 @@ func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		m.mode = modeList
 		m.input.Blur()
 		if m.searchActive() {
-			m.status = fmt.Sprintf("Search: %s", m.searchQuery)
+			if m.searchFuzzy {
+				m.status = fmt.Sprintf("Fuzzy search: %s", m.searchQuery)
+			} else {
+				m.status = fmt.Sprintf("Search: %s", m.searchQuery)
+			}
 		} else {
+			m.searchFuzzy = false
 			m.status = "Search cleared"
 		}
 		m.cursor = clampCursor(0, len(m.visibleItems()))
@@ -6270,6 +6640,23 @@ func (m *Model) processNavKey(key string) bool {
 	if m.pendingSort && key != "+" && key != "-" {
 		m.flushPendingSort(key)
 	}
+	if key == "," {
+		m.navBuf = ","
+		m.status = ", (press f for fuzzy search)"
+		return true
+	}
+	if m.navBuf == "," {
+		m.navBuf = ""
+		if key == "f" {
+			m.mode = modeSearch
+			m.searchFuzzy = true
+			m.input.SetValue(m.searchQuery)
+			m.input.Placeholder = "Fuzzy search tasks"
+			m.input.Focus()
+			m.status = "Fuzzy search: type a query, Enter to apply, Esc to cancel"
+			return true
+		}
+	}
 	if key == "g" {
 		if m.navBuf == "g" {
 			m.cursor = 0
@@ -6723,10 +7110,78 @@ func intervalString(v int) string {
 }
 
 func (m Model) visibleItems() []listItem {
+	items := m.applyQuickFilterToItems(m.defaultVisibleItems())
 	if m.searchActive() {
-		return m.searchItems()
+		return filterItemsByQuery(items, m.searchQuery, m.searchFuzzy)
 	}
-	return m.defaultVisibleItems()
+	return items
+}
+
+func (m *Model) applyQuickFilter(cmd string) {
+	filter := normalizeQuickFilter(cmd)
+	m.filterDone = filter
+	m.cursor = clampCursor(0, len(m.visibleItems()))
+	if m.quickFilterActive() {
+		m.status = fmt.Sprintf("Filter: %s", filter)
+	} else {
+		m.status = "Filter cleared"
+	}
+}
+
+func normalizeQuickFilter(v string) string {
+	v = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), ":")
+	switch v {
+	case "", "all", "clear", "reset":
+		return "all"
+	case "completed":
+		return "done"
+	case "progress":
+		return "in-progress"
+	default:
+		return v
+	}
+}
+
+func (m Model) quickFilterActive() bool {
+	return normalizeQuickFilter(m.filterDone) != "all"
+}
+
+func (m Model) applyQuickFilterToItems(candidates []listItem) []listItem {
+	filter := normalizeQuickFilter(m.filterDone)
+	if filter == "all" {
+		return candidates
+	}
+	items := make([]listItem, 0, len(candidates))
+	for _, it := range candidates {
+		if it.kind != itemTask || taskMatchesQuickFilter(it.task, filter) {
+			items = append(items, it)
+		}
+	}
+	return items
+}
+
+func taskMatchesQuickFilter(t storage.Task, filter string) bool {
+	switch normalizeQuickFilter(filter) {
+	case "overdue":
+		return isOverdue(t)
+	case "pending":
+		return !isDone(t) && strings.ToUpper(strings.TrimSpace(t.Status)) == "PENDING"
+	case "done":
+		return isDone(t)
+	case "in-progress":
+		return !isDone(t) && strings.ToUpper(strings.TrimSpace(t.Status)) == "IN-PROGRESS"
+	case "today":
+		return !isDone(t) && t.Due.Valid && normalizeDate(t.Due.Time).Equal(normalizeDate(time.Now()))
+	case "week":
+		if isDone(t) || !t.Due.Valid {
+			return false
+		}
+		today := normalizeDate(time.Now())
+		due := normalizeDate(t.Due.Time)
+		return !due.Before(today) && due.Before(today.AddDate(0, 0, 7))
+	default:
+		return true
+	}
 }
 
 func (m Model) defaultVisibleItems() []listItem {
@@ -6757,31 +7212,23 @@ func (m Model) defaultVisibleItems() []listItem {
 	return items
 }
 
-func (m Model) searchItems() []listItem {
-	query := strings.TrimSpace(m.searchQuery)
+func filterItemsByQuery(candidates []listItem, query string, fuzzy bool) []listItem {
+	query = strings.TrimSpace(query)
 	if query == "" {
-		return m.defaultVisibleItems()
+		return candidates
 	}
 	q := strings.ToLower(query)
-	items := make([]listItem, 0)
-	var candidates []storage.Task
-	switch {
-	case m.currentTopic == "RecentlyAdded":
-		candidates = m.recentlyAdded(m.recentLimit)
-	case m.currentTopic == "RecentlyDone":
-		candidates = m.recentlyDone(m.recentLimit)
-	case m.currentTopic != "":
-		for _, t := range m.tasks {
-			if taskHasTopic(t, m.currentTopic) {
-				candidates = append(candidates, t)
-			}
+	items := make([]listItem, 0, len(candidates))
+	for _, it := range candidates {
+		if it.kind != itemTask {
+			continue
 		}
-	default:
-		candidates = m.tasks
-	}
-	for _, t := range candidates {
-		if taskMatchesQuery(t, q) {
-			items = append(items, listItem{kind: itemTask, task: t, topic: strings.Join(t.Topics, ",")})
+		if fuzzy {
+			if taskMatchesFuzzyQuery(it.task, q) {
+				items = append(items, it)
+			}
+		} else if taskMatchesQuery(it.task, q) {
+			items = append(items, it)
 		}
 	}
 	return items
@@ -6791,20 +7238,82 @@ func (m Model) searchActive() bool {
 	return strings.TrimSpace(m.searchQuery) != ""
 }
 
+func taskMatchesFuzzyQuery(t storage.Task, query string) bool {
+	if query == "" {
+		return true
+	}
+	candidate := strings.Join(taskSearchFields(t), " ")
+	for _, token := range strings.Fields(query) {
+		if !fuzzyMatch(candidate, token) {
+			return false
+		}
+	}
+	return true
+}
+
+func fuzzyMatch(candidate, query string) bool {
+	candidate = strings.ToLower(candidate)
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	j := 0
+	qr := []rune(query)
+	for _, r := range candidate {
+		if r == qr[j] {
+			j++
+			if j == len(qr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func taskMatchesQuery(t storage.Task, query string) bool {
-	fields := []string{t.Title, strings.Join(t.Topics, " "), t.Tags, t.Assignee, t.Reporter}
-	if t.Due.Valid {
-		fields = append(fields, formatDateTime(t.Due))
-	}
-	if t.End.Valid {
-		fields = append(fields, formatDateTime(t.End))
-	}
-	for _, field := range fields {
+	for _, field := range taskSearchFields(t) {
 		if strings.Contains(strings.ToLower(field), query) {
 			return true
 		}
 	}
 	return false
+}
+
+func taskSearchFields(t storage.Task) []string {
+	fields := []string{
+		t.Title,
+		fmt.Sprintf("#%d", t.ID),
+		fmt.Sprintf("id:%d", t.ID),
+		taskStatusLabel(t),
+		strings.Join(t.Topics, " "),
+		t.Tags,
+		t.Assignee,
+		t.Reporter,
+		fmt.Sprintf("priority:%d", t.Priority),
+		fmt.Sprintf("p%d", t.Priority),
+		t.Timezone,
+		t.Notes,
+	}
+	if t.Recurring {
+		fields = append(fields, "recurring", t.RecurrenceRule, fmt.Sprintf("interval:%d", t.RecurrenceInterval))
+	}
+	for _, nt := range []struct {
+		name string
+		val  sql.NullTime
+	}{
+		{"due", t.Due},
+		{"start", t.Start},
+		{"end", t.End},
+		{"completed", t.CompletedAt},
+	} {
+		if nt.val.Valid {
+			fields = append(fields, formatDateTime(nt.val), nt.name+":"+formatDateTime(nt.val), nt.name+":"+nt.val.Time.Format("2006-01-02"))
+		}
+	}
+	if !t.CreatedAt.IsZero() {
+		fields = append(fields, t.CreatedAt.Format("2006-01-02"), "created:"+t.CreatedAt.Format("2006-01-02"))
+	}
+	return fields
 }
 
 func taskHasTopic(t storage.Task, topic string) bool {
