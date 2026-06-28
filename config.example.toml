@@ -2,6 +2,10 @@ db_path = "bada.db"
 default_filter = "all"
 trash_dir = "trash"
 
+[agenda]
+# How many days ahead :agenda shows in the Upcoming section.
+upcoming_days = 3
+
 [keys]
 quit = "q"
 add = "a"

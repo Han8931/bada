@@ -12,14 +12,18 @@ type keyHint struct {
 	label string
 }
 
-// panelInnerWidth is the content width available inside a framed panel
-// (terminal width minus the two vertical border cells).
+// panelInnerWidth is the content width available inside a framed panel.
+//
+// Leave one terminal cell unused on the right. Writing the bottom/right-most
+// cell can put some terminals into pending-wrap, which shows up as a duplicated
+// status bar on the next repaint. The status bar already leaves this spare cell;
+// framed body views must do the same, especially the dense Gantt grid.
 func (m Model) panelInnerWidth() int {
 	w := m.width
 	if w <= 0 {
 		w = 80
 	}
-	inner := w - 2
+	inner := w - 3 // two borders plus one spare anti-wrap cell
 	if inner < 10 {
 		inner = 10
 	}
@@ -81,10 +85,16 @@ func (m Model) hintBar(hints []keyHint) string {
 		parts = append(parts, cap+" "+m.styles.KeyLabel.Render(h.label))
 	}
 	out := " " + strings.Join(parts, sep)
-	// Clip to the terminal width so a long hint row can't wrap onto a second
-	// line and push the rest of the layout off-screen.
-	if m.width > 0 && lipgloss.Width(out) > m.width {
-		out = truncateANSI(out, m.width)
+	// Clip one cell short of the terminal width so a long hint row can't wrap onto
+	// a second line or trigger pending-wrap at the right edge.
+	if m.width > 0 {
+		maxWidth := m.width - 1
+		if maxWidth < 1 {
+			maxWidth = 1
+		}
+		if lipgloss.Width(out) > maxWidth {
+			out = truncateANSI(out, maxWidth)
+		}
 	}
 	return out
 }

@@ -67,12 +67,17 @@ type Holiday struct {
 	Name string `toml:"name"`
 }
 
+type Agenda struct {
+	UpcomingDays int `toml:"upcoming_days"`
+}
+
 type Config struct {
 	DBPath        string    `toml:"db_path"`
 	DefaultFilter string    `toml:"default_filter"`
 	TrashDir      string    `toml:"trash_dir"`
 	Keys          Keymap    `toml:"keys"`
 	Theme         Theme     `toml:"theme"`
+	Agenda        Agenda    `toml:"agenda"`
 	Holidays      []Holiday `toml:"holidays"`
 }
 
@@ -102,7 +107,17 @@ func LoadOrCreate(path string) (Config, error) {
 	if cfg.TrashDir == "" {
 		cfg.TrashDir = DefaultTrashPath()
 	}
+	applyAgendaDefaults(&cfg)
 	return cfg, nil
+}
+
+func applyAgendaDefaults(cfg *Config) {
+	if cfg.Agenda.UpcomingDays <= 0 {
+		cfg.Agenda.UpcomingDays = defaultConfig().Agenda.UpcomingDays
+	}
+	if cfg.Agenda.UpcomingDays > 365 {
+		cfg.Agenda.UpcomingDays = 365
+	}
 }
 
 func applyKeyDefaults(cfg *Config) {
@@ -214,6 +229,9 @@ func defaultConfig() Config {
 			DeleteAllDone: "X",
 			Search:        "/",
 			NoteView:      "enter",
+		},
+		Agenda: Agenda{
+			UpcomingDays: 3,
 		},
 		Theme: Theme{
 			Title:       "#2563EB",

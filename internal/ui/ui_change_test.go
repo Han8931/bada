@@ -253,6 +253,25 @@ func TestNoteViewNeverOverflowsWidth(t *testing.T) {
 // header disappears" scroll: the bottom status row must stop one cell short of
 // the full width so writing the bottom-right cell can't leave the terminal in a
 // pending-wrap state that scrolls the screen on the next repaint.
+func TestGanttViewLeavesLastCellFree(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 90
+	m.height = 16
+	now := time.Now()
+	m.tasks = []storage.Task{{
+		ID: 1, Title: "Very long gantt task", Status: "IN-PROGRESS", CreatedAt: now,
+		Start: sql.NullTime{Time: now.AddDate(0, 0, -30), Valid: true},
+		Due:   sql.NullTime{Time: now.AddDate(0, 0, 900), Valid: true},
+	}}
+	r, _ := m.enterGanttView()
+	m = r.(Model)
+	for i, line := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(line); w > m.width-1 {
+			t.Fatalf("gantt view line %d width %d should leave last cell free (<= %d): %q", i, w, m.width-1, line)
+		}
+	}
+}
+
 func TestStatusBarLeavesLastCellFree(t *testing.T) {
 	for _, mode := range []func(Model) Model{
 		func(m Model) Model { return m }, // list
@@ -707,11 +726,14 @@ func TestGanttNavigationSelectsTask(t *testing.T) {
 		t.Fatalf("after down expected task 2, got %+v ok=%v", task, ok)
 	}
 
-	// The highlighted row carries the selection marker (▸, a guaranteed one-cell
-	// glyph so the selected row can't overflow and wrap in CJK terminals).
+	// The selected task is summarized above the rows; the row itself is highlighted
+	// as a block, so it should not need an extra wedge marker.
 	grid := strings.Join(m.timelineGridLines(20), "\n")
-	if !strings.Contains(grid, "▸") {
-		t.Fatalf("expected a selection marker in the gantt, got:\n%s", grid)
+	if strings.Contains(grid, "▸") {
+		t.Fatalf("did not expect a wedge cursor marker in the gantt, got:\n%s", grid)
+	}
+	if !strings.Contains(grid, "#2  PENDING") {
+		t.Fatalf("expected selected task summary in the gantt, got:\n%s", grid)
 	}
 }
 

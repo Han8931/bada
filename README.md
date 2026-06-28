@@ -37,7 +37,7 @@ stays flat and scan-friendly.
 
 Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 
-- `:agenda` — reminder report (also opens on launch).
+- `:agenda` — reminder report (also opens on launch); shows overdue, today, and a configurable upcoming window grouped by date.
 - `:calendar` — month grid; `h/l` day, `j/k` week, `H/L` month, `Enter` day detail.
 - `:gantt` — timeline of tasks with start/due bars and a "today" marker.
 - `:stats` — productivity dashboard: counts, completions (today/week/month),
@@ -71,7 +71,7 @@ Quick filter commands:
 - Search: `/` opens a query prompt; `F` or `,f` opens fuzzy search;
   `Enter` applies, `Esc` cancels (submit empty to clear).
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview.
-- Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/next 3d pending tasks).
+- Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/upcoming pending tasks with flag priority marks and relative due labels). Use `j/k` to select, `Enter` notes, `r` status, `e` edit, `[`/`]` reschedule, `g` jump to the task list.
 - Help: `?` (or `:help`) opens the full keybinding reference.
 - Other views: `:calendar` (month grid) and `:gantt` (timeline).
 - From a filtered/searched/topic-scoped list, `Esc` or `q` returns to the
@@ -132,7 +132,7 @@ Options:
 
 ## Basic Features
 
-* Agenda reporting config (+7 or +3)
+* Agenda row selection/actions (jump to task, edit, rotate status, reschedule directly from agenda)
 * **Data Portability:** Robust Import/Export (CSV/JSON/TOML) and automatic SQLite maintenance (VACUUM/Snapshots).
 * Integrate with Gorae / Bori
 

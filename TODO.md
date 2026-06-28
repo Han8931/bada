@@ -4,10 +4,18 @@ Tracking UI/UX work. Impact / effort tags are rough guides.
 
 ## Current focus / next ideas
 
+- [ ] **Refactor agenda view** — split agenda/report rendering, selection, and
+      actions out of `internal/ui/ui.go` into `internal/ui/agenda_view.go`.
+- [ ] **Refactor UI by view** — gradually split `internal/ui/ui.go` into focused
+      files for list, calendar, gantt, stats, metadata modal, notes, search,
+      recurrence, and date helpers.
 - [ ] **Fuzzy search** — improve search with fuzzy matching and clearer result
       highlighting.
-- [ ] **Agenda and calendar views** — improve the agenda flow and calendar view
-      readability/interaction.
+- [ ] **Agenda and calendar views** — improve calendar readability.
+- [x] **Agenda row interaction** — selectable agenda rows with notes, status,
+      edit, reschedule, and jump-to-list actions.
+- [x] **Agenda readability** — configurable upcoming window, grouped upcoming days,
+      priority markers, relative due labels, and agenda-specific footer hints.
 - [ ] **Gantt view improvements** — continue improving timeline readability,
       navigation, zooming, and task/date presentation.
 - [ ] Topic Navigation bar
@@ -27,6 +35,9 @@ Tracking UI/UX work. Impact / effort tags are rough guides.
 
 ## Layout & structure
 
+- [ ] Split agenda/report code into `internal/ui/agenda_view.go` — high / low
+- [ ] Split storage code by responsibility (`schema.go`, `tasks.go`, `topics.go`,
+      `trash.go`, `time.go`) — med / med
 - [ ] Two-pane layout: list left, live detail/metadata panel right — high / high
 - [ ] Slim top app header bar (name + date + counts) — med / low
 - [ ] Responsive columns (drop Tags/Pri when narrow, widen Title when wide) — med / med
@@ -54,6 +65,17 @@ Tracking UI/UX work. Impact / effort tags are rough guides.
 - [ ] Calendar load heatmap + per-day priority dots — med / med
 - [ ] Gantt: color bars by status/priority, weekend shading, clearer "today" line — med / med
 
+## Quality & maintainability
+
+- [ ] Add config tests for defaults, save/load roundtrip, missing fields, and
+      `[agenda].upcoming_days` — high / low
+- [ ] Introduce a testable clock/`now` helper for agenda, calendar, recurrence,
+      and relative due-date behavior — med / med
+- [ ] Standardize timezone semantics for user-facing due-date calculations — high / med
+- [ ] Add versioned SQLite migrations via `PRAGMA user_version` — med / med
+- [ ] Extract shared task actions used by list and agenda views: rotate status,
+      shift due date, edit, notes, jump/select — med / low
+
 ## Features (planned — owner: @han)
 
 - [ ] **Job/task detail customization** — let users customize the task detail view
@@ -63,5 +85,6 @@ Tracking UI/UX work. Impact / effort tags are rough guides.
 
 ---
 
-Top picks: relative due dates, adaptive/dark default, scroll affordances + count in
-title, and the two-pane detail panel for one bigger transformative change.
+Top picks: agenda refactor first, then config tests, timezone cleanup, adaptive/dark
+default, scroll affordances + count in title, and the two-pane detail panel for one
+bigger transformative change.
