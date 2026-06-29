@@ -250,9 +250,9 @@ func TestNoteViewNeverOverflowsWidth(t *testing.T) {
 }
 
 // TestStatusBarLeavesLastCellFree guards the alt-screen "duplicate status bar /
-// header disappears" scroll: the bottom status row must stop one cell short of
-// the full width so writing the bottom-right cell can't leave the terminal in a
-// pending-wrap state that scrolls the screen on the next repaint.
+// header disappears" scroll: rendered rows must stop short of the full width so
+// writing near the bottom-right edge can't leave the terminal in a pending-wrap
+// state that scrolls the screen on the next repaint.
 func TestGanttViewLeavesLastCellFree(t *testing.T) {
 	m := newTestModel(t)
 	m.width = 90
@@ -266,8 +266,8 @@ func TestGanttViewLeavesLastCellFree(t *testing.T) {
 	r, _ := m.enterGanttView()
 	m = r.(Model)
 	for i, line := range strings.Split(m.View(), "\n") {
-		if w := lipgloss.Width(line); w > m.width-1 {
-			t.Fatalf("gantt view line %d width %d should leave last cell free (<= %d): %q", i, w, m.width-1, line)
+		if w := lipgloss.Width(line); w > m.width-2 {
+			t.Fatalf("gantt view line %d width %d should leave edge cells free (<= %d): %q", i, w, m.width-2, line)
 		}
 	}
 }
@@ -285,8 +285,8 @@ func TestStatusBarLeavesLastCellFree(t *testing.T) {
 		m = mode(m)
 		lines := strings.Split(m.View(), "\n")
 		last := lines[len(lines)-1]
-		if w := lipgloss.Width(last); w > m.width-1 {
-			t.Fatalf("status bar width %d should leave the last cell free (<= %d), mode=%d", w, m.width-1, m.mode)
+		if w := lipgloss.Width(last); w > m.width-2 {
+			t.Fatalf("status bar width %d should leave edge cells free (<= %d), mode=%d", w, m.width-2, m.mode)
 		}
 	}
 }
@@ -726,14 +726,14 @@ func TestGanttNavigationSelectsTask(t *testing.T) {
 		t.Fatalf("after down expected task 2, got %+v ok=%v", task, ok)
 	}
 
-	// The selected task is summarized above the rows; the row itself is highlighted
-	// as a block, so it should not need an extra wedge marker.
+	// The selected row is highlighted like the list view, without an extra wedge
+	// marker or separate status summary row above the tasks.
 	grid := strings.Join(m.timelineGridLines(20), "\n")
 	if strings.Contains(grid, "▸") {
 		t.Fatalf("did not expect a wedge cursor marker in the gantt, got:\n%s", grid)
 	}
-	if !strings.Contains(grid, "#2  PENDING") {
-		t.Fatalf("expected selected task summary in the gantt, got:\n%s", grid)
+	if strings.Contains(grid, "#2  PENDING") {
+		t.Fatalf("did not expect a separate selected-task summary row in the gantt, got:\n%s", grid)
 	}
 }
 

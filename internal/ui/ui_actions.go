@@ -2619,13 +2619,12 @@ func (m Model) padStatusBar(base lipgloss.Style, content string) string {
 	if m.width <= 0 {
 		return content
 	}
-	// Target one cell short of the full width. The status bar is the bottom row;
-	// writing its last cell can leave the terminal in a pending-wrap state that
-	// scrolls the alt-screen by a line on the next repaint — which shows up as the
-	// top (header) row vanishing and the status bar appearing duplicated, most
-	// often in the gantt where navigation triggers full re-renders. The spare cell
-	// also absorbs an off-by-one from an ambiguous-width glyph in a status message.
-	target := m.width - 1
+	// Target two cells short of the full width. The status bar is the bottom row;
+	// writing near the last cell can leave some terminals in a pending-wrap state
+	// that scrolls the alt-screen by a line on the next repaint — which shows up as
+	// the top row vanishing and the status bar appearing duplicated, most often in
+	// the Gantt view where navigation triggers dense full-row re-renders.
+	target := m.width - 2
 	if target < 1 {
 		target = 1
 	}
@@ -2646,12 +2645,12 @@ func (m Model) fillView(body string) string {
 		target = 1
 	}
 	lines := strings.Split(body, "\n")
-	// Clip every line one cell short of the terminal width. Framed views should
+	// Clip every line two cells short of the terminal width. Framed views should
 	// already fit this, but unframed/ANSI-heavy views (notably Gantt) must never
-	// write the right-most cell: doing so can trigger pending-wrap and make the
+	// write near the right edge: doing so can trigger pending-wrap and make the
 	// next repaint look like an extra status bar was inserted at the bottom.
 	if m.width > 0 {
-		maxWidth := m.width - 1
+		maxWidth := m.width - 2
 		if maxWidth < 1 {
 			maxWidth = 1
 		}

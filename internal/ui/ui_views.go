@@ -1833,22 +1833,13 @@ func (m Model) timelinePanelTitle() string {
 	return fmt.Sprintf("bada ∙ Timeline  %s-%s%s", start.Format("Jan 2"), end.Format("Jan 2"), extra)
 }
 
-// ganttColCellBg paints date backgrounds for a Gantt cell.
+// ganttColCellBg styles timeline body cells. Today's column carries a thin
+// vertical "now" line (see timelineTaskRow) rather than a full-height band.
 func (m Model) ganttColCellBg(base lipgloss.Style, isToday bool) lipgloss.Style {
-	if isToday {
-		if c := m.cfg.Theme.SelectionBg; c != "" {
-			base = base.Background(lipgloss.Color(c))
-		}
-	}
 	return base
 }
 
 func (m Model) ganttHeaderCellBg(base lipgloss.Style, d time.Time, isToday bool) lipgloss.Style {
-	if isToday {
-		if c := m.cfg.Theme.SelectionBg; c != "" {
-			base = base.Background(lipgloss.Color(c))
-		}
-	}
 	return base
 }
 
@@ -1860,7 +1851,6 @@ func (m Model) timelineGridLines(maxLines int) []string {
 	lines := make([]string, 0)
 	lines = append(lines, m.timelineMonthHeader(scale, today))
 	lines = append(lines, m.timelineDayHeader(scale, today))
-	lines = append(lines, m.timelineSelectionSummary(items, scale))
 
 	rowBudget := len(items)
 	if maxLines > 0 {
@@ -1936,23 +1926,10 @@ func (m Model) timelineMonthHeader(scale timelineScale, today time.Time) string 
 		}
 		prevKey = key
 	}
-	todayCol := scale.colOf(today)
-	// Mark today with a downward triangle above its column when the slot is free.
-	// A small triangle (▾) is one cell wide even in CJK terminals, unlike • which
-	// is ambiguous-width and would shift the header.
-	if todayCol >= 0 && todayCol < n {
-		if c := todayCol*timelineCellW + 1; cells[c] == ' ' {
-			cells[c] = '▾'
-		}
-	}
 	var b strings.Builder
 	for i := 0; i < n; i++ {
-		fg := m.styles.Accent
-		if i == todayCol {
-			fg = m.styles.Accent.Bold(true)
-		}
 		seg := string(cells[i*timelineCellW : i*timelineCellW+timelineCellW])
-		b.WriteString(m.ganttHeaderCellBg(fg, scale.colStartDate(i), i == todayCol).Render(seg))
+		b.WriteString(m.ganttHeaderCellBg(m.styles.Accent, scale.colStartDate(i), false).Render(seg))
 	}
 	return m.styles.Muted.Render(padRightWidth("", scale.leftW)) + " " + b.String()
 }
@@ -1974,7 +1951,7 @@ func (m Model) timelineDayHeader(scale timelineScale, today time.Time) string {
 		var fg lipgloss.Style
 		switch {
 		case i == todayCol:
-			fg = m.styles.Accent.Bold(true)
+			fg = m.styles.Accent.Bold(true).Underline(true)
 		case scale.unitDays > 1:
 			// Weekend/holiday shading is only meaningful at daily resolution.
 			fg = m.styles.Muted
@@ -2086,11 +2063,17 @@ func (m Model) timelineTaskRow(it timelineItem, scale timelineScale, today time.
 				fg = fg.Background(lipgloss.Color(bandColor))
 			}
 		}
-		if i == todayCol && !inPlan && i != dueCol {
-			content = " │ "
-			fg = m.styles.Accent
+		if i == todayCol {
+			// Draw the current-date marker as a thin vertical line down the chart.
+			// It overlays whatever sits in this column's centre — empty slot, plan
+			// bar, or due band — so the "now" line stays continuous across rows.
+			runes := []rune(content)
+			b.WriteString(m.ganttColCellBg(fg, true).Render(string(runes[0])))
+			b.WriteString(m.styles.Warning.Bold(true).Render("│"))
+			b.WriteString(m.ganttColCellBg(fg, true).Render(string(runes[2])))
+		} else {
+			b.WriteString(m.ganttColCellBg(fg, false).Render(content))
 		}
-		b.WriteString(m.ganttColCellBg(fg, i == todayCol).Render(content))
 	}
 	labelOut := padRightWidth(label, scale.leftW)
 	if selected {
@@ -2112,17 +2095,14 @@ func (m Model) timelineLegend() string {
 	if c := m.cfg.Theme.StatusBg; c != "" {
 		weekend = weekend.Background(lipgloss.Color(c))
 	}
-	todayCol := m.styles.Accent
-	if c := m.cfg.Theme.SelectionBg; c != "" {
-		todayCol = todayCol.Background(lipgloss.Color(c))
-	}
+	todayCell := m.styles.Accent.Bold(true).Underline(true)
 	parts := []string{
 		m.styles.Border.Render("▬▬") + m.styles.Muted.Render(" planned"),
 		m.styles.Success.Render("▬▬") + m.styles.Muted.Render(" in-progress"),
 		m.styles.Accent.Render("▮▮") + m.styles.Muted.Render(" due"),
 		m.styles.Danger.Render("▮▮") + m.styles.Muted.Render(" overdue"),
 		weekend.Render("  ") + m.styles.Muted.Render(" weekend"),
-		todayCol.Render("│ ") + m.styles.Muted.Render(" today"),
+		todayCell.Render("dd") + m.styles.Warning.Bold(true).Render("│") + m.styles.Muted.Render(" today"),
 	}
 	// Only advertise holidays when the user has configured some.
 	if len(m.cfg.Holidays) > 0 {
