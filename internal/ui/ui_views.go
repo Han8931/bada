@@ -256,21 +256,14 @@ func (m Model) toggleReportTaskStatus() (tea.Model, tea.Cmd) {
 		m.status = "No agenda task selected"
 		return m, nil
 	}
-	nextStatus := nextTaskStatus(t)
-	if err := m.store.SetStatus(t.ID, nextStatus); err != nil {
+	next, err := m.advanceTaskStatus(t)
+	if err != nil {
 		m.status = fmt.Sprintf("status failed: %v", err)
 		return m, nil
 	}
-	var err error
-	m.tasks, err = m.store.FetchTasks()
-	if err != nil {
-		m.status = fmt.Sprintf("reload failed: %v", err)
-		return m, nil
-	}
-	m.sortTasks()
 	m.refreshReport()
 	m.ensureReportCursorVisible()
-	m.status = "Status: " + nextStatus
+	m.status = "Status: " + next
 	return m, nil
 }
 
@@ -1081,9 +1074,18 @@ func (m Model) helpContent() string {
   :calendar  Open calendar view
   :gantt     Open gantt timeline
   :stats     Open productivity stats
+  :dashboard Open project (topic) dashboard
+  :board [t] Kanban board for a project's workflow
+  :stage <n> Filter list to a workflow stage
   :config    Update config and db paths
   :help / ?  Open this help screen
   :q / :quit Quit bada
+
+Projects (:dashboard):
+  enter  Scope to project   w  Edit status workflow
+  e desc · t target · a archive   The 1st topic on a task is its project.
+  Workflow editor: a add · e rename · c category · J/K reorder · D delete
+  Board (:board): h/l column · j/k task · enter detail · L/H advance/send back · esc close
 
 List Navigation:
   %s/%s  Move cursor
@@ -1100,9 +1102,10 @@ Tasks:
   space  Select task (multi-select)
   %s     Delete selected
   %s     Delete all done (with confirm)
+  u      Undo last edit (status/priority/due/metadata)
 
 Sorting (press s, then):
-  d due · p priority · t created · o topic · a auto · s state
+  d due · p priority · t created · o topic · w stage · a auto · s state
   Repeat the same sort to reverse the order (↑/↓ in the status bar)
 
 Create/Edit Task:
@@ -1280,6 +1283,28 @@ func (m Model) statsContent() string {
 	line := func(s string) { b.WriteString(s + "\n") }
 
 	b.WriteString(m.styles.Muted.Render(now.Format("Monday, Jan 2, 2006")) + "\n\n")
+
+	// When scoped to a real topic, lead with that project's progress and, if it
+	// has a custom workflow, its stage funnel.
+	if scoped := m.scopedTopicName(); scoped != "" {
+		st := m.topicStats()[scoped]
+		spct := 0
+		if st.total > 0 {
+			spct = st.done * 100 / st.total
+		}
+		heading("Project · " + scoped)
+		line(fmt.Sprintf("  %s  %d/%d done (%d%%)   %s %d",
+			pctBar(st.done, st.total, 16), st.done, st.total, spct,
+			m.styles.Danger.Render("overdue"), st.overdue))
+		if counts := m.topicStageStats(scoped); len(counts) > 0 {
+			parts := make([]string, 0, len(counts))
+			for _, c := range counts {
+				parts = append(parts, fmt.Sprintf("%s %s", m.stageBadge(c.Stage), m.styles.Accent.Render(fmt.Sprintf("%d", c.Count))))
+			}
+			line("  " + strings.Join(parts, m.styles.Muted.Render(" → ")))
+		}
+		b.WriteString("\n")
+	}
 
 	pct := 0
 	if total > 0 {
@@ -2000,9 +2025,9 @@ func (m Model) timelineSelectionSummary(items []timelineItem, scale timelineScal
 		return m.styles.Muted.Render(padRightWidth("  No task selected", width))
 	}
 	t := it.task
-	parts := []string{fmt.Sprintf("#%d", t.ID), taskStatusLabel(t)}
+	parts := []string{fmt.Sprintf("#%d", t.ID), m.taskStatusLabel(t)}
 	if t.Priority != 0 {
-		parts = append(parts, fmt.Sprintf("P%d", t.Priority))
+		parts = append(parts, priorityLabel(t.Priority))
 	}
 	parts = append(parts, "start "+it.start.Format("Jan 2"))
 	if t.Due.Valid {

@@ -30,6 +30,9 @@ const (
 	modeHelp
 	modeGantt
 	modeStats
+	modeDashboard
+	modeWorkflow
+	modeBoard
 )
 
 type noteKind int
@@ -249,6 +252,33 @@ type Model struct {
 	configStage       configStage
 	pendingCfgPath    string
 	pendingDBPath     string
+	workflows         map[string][]storage.Stage
+	topicMeta         map[string]storage.TopicMeta
+	workflowEdit      *workflowEditState
+	dashboardCursor   int
+	dashboardScroll   int
+	dashEditing       string // "", "desc", or "target": which topic-meta field is being typed
+	boardTopic        string // project shown in the kanban board
+	boardCol          int
+	boardRow          int
+	undo              *undoEntry
+}
+
+// undoEntry holds a single reversible snapshot for the u key.
+type undoEntry struct {
+	task storage.Task // the task's state before the last in-place edit
+	desc string       // human description, e.g. "status change"
+}
+
+// workflowEditState backs the per-topic workflow editor (modeWorkflow).
+type workflowEditState struct {
+	topic      string
+	stages     []storage.Stage
+	cursor     int
+	editing    bool // a stage name is being typed
+	adding     bool // the in-progress edit is a new stage (vs. rename)
+	returnMode mode // view to restore when the editor closes
+	dirty      bool // unsaved changes pending
 }
 
 func Run(store *storage.Store, cfg config.Config, configPath string, firstLaunch bool) error {
@@ -280,6 +310,14 @@ func Run(store *storage.Store, cfg config.Config, configPath string, firstLaunch
 		currentTopic:      "",
 		commandHistoryIdx: -1,
 		styles:            buildStyles(cfg.Theme),
+		workflows:         map[string][]storage.Stage{},
+		topicMeta:         map[string]storage.TopicMeta{},
+	}
+	if wf, err := store.AllTopicWorkflows(); err == nil {
+		m.workflows = wf
+	}
+	if tm, err := store.AllTopicMeta(); err == nil {
+		m.topicMeta = tm
 	}
 	m.sortTasks()
 	m.refreshReport()
@@ -323,6 +361,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeStats {
 			return m.updateStatsMode(msg.String())
+		}
+		if m.mode == modeDashboard {
+			return m.updateDashboardMode(msg.String(), msg)
+		}
+		if m.mode == modeWorkflow {
+			return m.updateWorkflowMode(msg.String(), msg)
+		}
+		if m.mode == modeBoard {
+			return m.updateBoardMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -472,21 +519,14 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		nextStatus := nextTaskStatus(task)
-		err := m.store.SetStatus(task.ID, nextStatus)
+		next, err := m.advanceTaskStatus(task)
 		if err != nil {
 			m.status = fmt.Sprintf("status failed: %v", err)
 			return m, nil
 		}
-		m.tasks, err = m.store.FetchTasks()
-		if err == nil {
-			m.sortTasks()
-			vis = m.visibleItems()
-			m.cursor = clampCursor(m.cursor, len(vis))
-			m.status = "Status: " + nextStatus
-		} else {
-			m.status = fmt.Sprintf("reload failed: %v", err)
-		}
+		vis = m.visibleItems()
+		m.cursor = clampCursor(m.cursor, len(vis))
+		m.status = "Status: " + next
 	case " ":
 		if task, ok := m.currentTask(); ok {
 			m.toggleTaskSelection(task.ID)
@@ -508,6 +548,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		m.confirmDel = true
 		m.pendingDel = nil
 		m.status = "Delete ALL done tasks? y/n"
+	case "u":
+		return m.applyUndo()
 	case "+":
 		if m.processSortKey("+") {
 			return m, nil
@@ -542,7 +584,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			m.status = "No task selected"
 			return m, nil
 		}
-		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, taskStatusLabel(task))
+		info := fmt.Sprintf("Task #%d • %s • %s", task.ID, task.Title, m.taskStatusLabel(task))
 		if len(task.Topics) > 0 {
 			info += " • topics:" + strings.Join(task.Topics, ",")
 		}
@@ -556,7 +598,7 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 			info += " • reporter:" + task.Reporter
 		}
 		if task.Priority != 0 {
-			info += fmt.Sprintf(" • priority:%d", task.Priority)
+			info += " • priority:" + priorityLabel(task.Priority)
 		}
 		if task.Due.Valid {
 			info += " • due:" + formatDateTime(task.Due) + overdueDetail(task)
@@ -673,6 +715,21 @@ func (m Model) View() string {
 
 	if m.mode == modeStats {
 		b.WriteString(m.renderStatsView())
+		return m.fillView(b.String())
+	}
+
+	if m.mode == modeDashboard {
+		b.WriteString(m.renderDashboardView())
+		return m.fillView(b.String())
+	}
+
+	if m.mode == modeWorkflow {
+		b.WriteString(m.renderWorkflowView())
+		return m.fillView(b.String())
+	}
+
+	if m.mode == modeBoard {
+		b.WriteString(m.renderBoardView())
 		return m.fillView(b.String())
 	}
 
@@ -920,26 +977,83 @@ func (m Model) updateDeleteConfirm(key string) (tea.Model, tea.Cmd) {
 	}
 }
 
+// reload refreshes tasks, workflows, and topic metadata from the store and
+// re-sorts. Workflows/meta are reloaded too so edits made elsewhere (workflow
+// editor, topic rename) are reflected immediately.
+func (m *Model) reload() error {
+	tasks, err := m.store.FetchTasks()
+	if err != nil {
+		return err
+	}
+	m.tasks = tasks
+	if wf, err := m.store.AllTopicWorkflows(); err == nil {
+		m.workflows = wf
+	}
+	if tm, err := m.store.AllTopicMeta(); err == nil {
+		m.topicMeta = tm
+	}
+	m.sortTasks()
+	return nil
+}
+
+// advanceTaskStatus rotates a task to the next status in its governing workflow
+// (or the legacy PENDING→IN-PROGRESS→DONE cycle), persists it with the correct
+// done flag, and reloads. Returns the new status label. Centralizing this is
+// what keeps done-derivation consistent across every rotate entry point.
+func (m *Model) advanceTaskStatus(t storage.Task) (string, error) {
+	m.snapshotUndo(t, "status change")
+	next := m.nextTaskStatus(t)
+	done := m.statusMeansDone(t, next)
+	if err := m.store.SetStatus(t.ID, next, done); err != nil {
+		return "", err
+	}
+	if err := m.reload(); err != nil {
+		return next, err
+	}
+	return next, nil
+}
+
+// snapshotUndo records a task's current state so the next u can revert the edit
+// about to happen. Single level: each snapshot replaces the previous one.
+func (m *Model) snapshotUndo(t storage.Task, desc string) {
+	m.undo = &undoEntry{task: t, desc: desc}
+}
+
+// applyUndo reverts the last recorded in-place task edit.
+func (m Model) applyUndo() (tea.Model, tea.Cmd) {
+	if m.undo == nil {
+		m.status = "Nothing to undo"
+		return m, nil
+	}
+	entry := m.undo
+	if err := m.store.OverwriteTask(entry.task); err != nil {
+		m.status = fmt.Sprintf("undo failed: %v", err)
+		return m, nil
+	}
+	m.undo = nil
+	if err := m.reload(); err != nil {
+		m.status = fmt.Sprintf("reload failed: %v", err)
+		return m, nil
+	}
+	m.cursor = clampCursor(m.findVisibleTaskIndex(entry.task.ID), len(m.visibleItems()))
+	m.refreshReport()
+	m.status = "Undid " + entry.desc + " (#" + fmt.Sprintf("%d", entry.task.ID) + ")"
+	return m, nil
+}
+
 func (m Model) toggleCurrentTaskStatus() (tea.Model, tea.Cmd) {
 	task, ok := m.currentTask()
 	if !ok {
 		m.status = "No task selected"
 		return m, nil
 	}
-	nextStatus := nextTaskStatus(task)
-	if err := m.store.SetStatus(task.ID, nextStatus); err != nil {
+	next, err := m.advanceTaskStatus(task)
+	if err != nil {
 		m.status = fmt.Sprintf("status failed: %v", err)
 		return m, nil
 	}
-	var err error
-	m.tasks, err = m.store.FetchTasks()
-	if err != nil {
-		m.status = fmt.Sprintf("reload failed: %v", err)
-		return m, nil
-	}
-	m.sortTasks()
 	m.cursor = clampCursor(m.cursor, len(m.visibleItems()))
-	m.status = "Status: " + nextStatus
+	m.status = "Status: " + next
 	return m, nil
 }
 

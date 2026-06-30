@@ -316,7 +316,7 @@ func (m Model) startMetadataEdit(t storage.Task) (tea.Model, tea.Cmd) {
 	m.meta = &metaState{
 		taskID:    t.ID,
 		title:     t.Title,
-		topic:     strings.Join(t.Topics, ","),
+		topic:     strings.Join(orderTopicsPrimaryFirst(t.Topics, t.PrimaryTopic), ","),
 		tags:      t.Tags,
 		assignee:  t.Assignee,
 		reporter:  t.Reporter,
@@ -717,7 +717,7 @@ func (m Model) cycleCompletion(dir int) Model {
 	return m
 }
 
-// stepPriority nudges the Priority field within the 0–5 range.
+// stepPriority nudges the Priority field within the 0–3 range.
 func (m *Model) stepPriority(delta int) {
 	if m.meta == nil {
 		return
@@ -727,8 +727,8 @@ func (m *Model) stepPriority(delta int) {
 	if val < 0 {
 		val = 0
 	}
-	if val > 5 {
-		val = 5
+	if val > maxPriority {
+		val = maxPriority
 	}
 	m.meta.priority = fmt.Sprintf("%d", val)
 	m.input.SetValue(m.meta.priority)
@@ -1124,8 +1124,15 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 			return m, err
 		}
 		taskID = newID
+	} else if idx := m.findTaskIndex(taskID); idx >= 0 {
+		// Snapshot the pre-edit state so u can revert a metadata edit.
+		m.snapshotUndo(m.tasks[idx], "edit")
 	}
 	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, m.meta.assignee, m.meta.reporter, timezone, priority, due, start, end, recurring); err != nil {
+		return m, err
+	}
+	// The first listed topic governs the task's status workflow (its "project").
+	if err := m.store.SetPrimaryTopic(taskID, firstTopic(m.meta.topic)); err != nil {
 		return m, err
 	}
 	if err := m.store.UpdateRecurrence(taskID, rule, interval); err != nil {
@@ -1165,8 +1172,8 @@ func parsePriority(v string) (int, error) {
 	if val < 0 {
 		val = 0
 	}
-	if val > 5 {
-		val = 5
+	if val > maxPriority {
+		val = maxPriority
 	}
 	return val, nil
 }
@@ -1402,7 +1409,7 @@ func (m Model) renderFuzzySearchModal() string {
 			if it.kind != itemTask {
 				continue
 			}
-			status := taskStatusLabel(it.task)
+			status := m.taskStatusLabel(it.task)
 			line := fmt.Sprintf("#%-4d %-12s %s", it.task.ID, status, truncateText(it.task.Title, boxInner-19))
 			meta := "      " + truncateText(fuzzyResultMeta(it.task), boxInner-6)
 			if i == 0 {
@@ -1432,7 +1439,7 @@ func fuzzyResultMeta(t storage.Task) string {
 		parts = append(parts, "reporter:"+t.Reporter)
 	}
 	if t.Priority > 0 {
-		parts = append(parts, fmt.Sprintf("p%d", t.Priority))
+		parts = append(parts, fmt.Sprintf("p%d", t.Priority), priorityLabel(t.Priority))
 	}
 	if t.Due.Valid {
 		parts = append(parts, "due:"+formatDateTime(t.Due))
@@ -1663,10 +1670,14 @@ func (m Model) renderModalToggleRow(active bool) string {
 }
 
 func (m Model) priorityDisplay(active bool) string {
-	disp := "—"
+	disp := m.styles.Muted.Render("— none")
 	if v := strings.TrimSpace(m.meta.priority); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
-			disp = m.priorityBadge(p)
+			if p <= 0 {
+				disp = m.styles.Muted.Render("— none")
+			} else {
+				disp = m.priorityBadge(p) + " " + m.priorityStyle(p).Render(priorityLabel(p))
+			}
 		} else {
 			disp = v
 		}
@@ -1677,20 +1688,36 @@ func (m Model) priorityDisplay(active bool) string {
 	return disp
 }
 
+// maxPriority is the highest priority level. Priority is a 3-level scale:
+// 0 = none, 1 = Low, 2 = Med, 3 = High.
+const maxPriority = 3
+
+// priorityLabel names a priority level: "" (none), Low, Med, or High.
+func priorityLabel(p int) string {
+	switch {
+	case p <= 0:
+		return ""
+	case p == 1:
+		return "Low"
+	case p == 2:
+		return "Med"
+	default:
+		return "High"
+	}
+}
+
 // priorityStyle maps a priority (higher = more urgent; 0 = none) to its color.
-// The ramp runs muted → green → amber → red so urgency reads at a glance.
+// The ramp runs muted → green (Low) → amber (Med) → red (High).
 func (m Model) priorityStyle(p int) lipgloss.Style {
 	switch {
 	case p <= 0:
 		return m.styles.Muted
-	case p <= 2:
+	case p == 1:
 		return m.styles.Success
-	case p == 3:
+	case p == 2:
 		return m.styles.Warning
-	case p == 4:
+	default: // 3 = High
 		return m.styles.Danger
-	default: // 5+
-		return m.styles.Danger.Bold(true)
 	}
 }
 
@@ -1701,6 +1728,14 @@ func (m Model) priorityBadge(p int) string {
 		return m.styles.Muted.Render("⚐")
 	}
 	return m.priorityStyle(p).Render("⚑")
+}
+
+// priorityCell renders the flag plus its Low/Med/High label, for detail panels.
+func (m Model) priorityCell(p int) string {
+	if p <= 0 {
+		return m.styles.Muted.Render("⚐ none")
+	}
+	return m.priorityBadge(p) + " " + m.priorityStyle(p).Render(priorityLabel(p))
 }
 
 // priorityField returns the fixed 4-wide task-list cell for a priority, colored
@@ -1732,6 +1767,9 @@ func (m Model) priorityField(p int, colored bool) string {
 // rows — selection/done rows recolor the whole line, so it returns a plain label
 // there to avoid clashing. In-progress is abbreviated so the padded badge fits.
 func (m Model) statusField(t storage.Task, width int, colored bool) string {
+	if stages, ok := m.governingWorkflow(t); ok {
+		return m.workflowStatusField(t, stages, width, colored)
+	}
 	label := taskStatusLabel(t)
 	if !colored {
 		return fmt.Sprintf("%-*s", width, label)
@@ -1746,6 +1784,49 @@ func (m Model) statusField(t storage.Task, width int, colored bool) string {
 		rendered = m.styles.StatusDone.Render(" DONE ")
 	default: // PENDING
 		rendered = m.styles.StatusPending.Render(label)
+	}
+	pad := width - lipgloss.Width(rendered)
+	if pad < 0 {
+		pad = 0
+	}
+	return rendered + strings.Repeat(" ", pad)
+}
+
+// workflowStatusField renders a custom-workflow stage badge. The color comes
+// from the stage's category; an overdue, not-yet-done task overlays the red
+// Overdue style with a trailing "!" while keeping the stage name visible.
+// Long custom names are truncated to fit the column.
+func (m Model) workflowStatusField(t storage.Task, stages []storage.Stage, width int, colored bool) string {
+	idx := currentStageIndex(stages, t.Status)
+	stage := stages[idx]
+	overdue := stage.Category != storage.StageDone && isOverdue(t)
+	label := stage.Name
+	// Reserve room for the surrounding spaces (and the "!" when overdue).
+	max := width - 2
+	if overdue {
+		max--
+	}
+	if max < 1 {
+		max = 1
+	}
+	label = truncateText(label, max)
+	if !colored {
+		text := label
+		if overdue {
+			text += "!"
+		}
+		return fmt.Sprintf("%-*s", width, text)
+	}
+	var rendered string
+	switch {
+	case overdue:
+		rendered = m.styles.StatusOverdue.Render(" " + label + "! ")
+	case stage.Category == storage.StageDone:
+		rendered = m.styles.StatusDone.Render(" " + label + " ")
+	case stage.Category == storage.StagePending:
+		rendered = m.styles.StatusPending.Render(label)
+	default: // active
+		rendered = m.styles.StatusProgress.Render(" " + label + " ")
 	}
 	pad := width - lipgloss.Width(rendered)
 	if pad < 0 {
@@ -1882,17 +1963,28 @@ func (m *Model) refreshReport() {
 	m.reportCursor = clampCursor(m.reportCursor, totalReportTasks)
 	m.reportTaskIDs = nil
 
-	// Title column scales with the terminal; the rest of the line (id prefix,
-	// priority, and trailing date) is ~42 cells. "∙" is one cell even in
+	// Title column scales with the terminal; the rest of the line (gutter, id,
+	// priority, and trailing date) is ~44 cells. "∙" is one cell even in
 	// CJK/Termius, unlike "•".
-	titleW := clampInt(m.width-46, 16, 52)
+	titleW := clampInt(m.width-48, 16, 52)
 	var b strings.Builder
 	writeDivider := func() {
 		b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
 		b.WriteString("\n")
 	}
-	writeSectionHeader := func(title string, count int, style lipgloss.Style) {
-		b.WriteString(style.Render(fmt.Sprintf("%s (%d)", title, count)))
+	// Section headers read as an iconned label followed by a count badge and a
+	// thin rule. Keep the human title casing in the text so the agenda scans like
+	// a dashboard instead of a log dump, while retaining "Title (n)" for tests and
+	// screen-reader-friendly plain output.
+	writeSectionHeader := func(icon, title string, count int, style lipgloss.Style) {
+		headText := fmt.Sprintf("  %s  %s (%d)", icon, title, count)
+		head := style.Bold(true).Render(headText)
+		ruleW := m.width - lipgloss.Width(head) - 1
+		if ruleW < 1 {
+			ruleW = 1
+		}
+		rule := m.styles.Border.Render(" " + strings.Repeat("─", ruleW))
+		b.WriteString(head + rule)
 		b.WriteString("\n")
 	}
 	localRelativeDue := func(t storage.Task) string {
@@ -1917,57 +2009,71 @@ func (m *Model) refreshReport() {
 			return fmt.Sprintf("%dd overdue", -days)
 		}
 	}
+	// Rows carry a section-colored left gutter, a narrow task bullet, a muted id,
+	// the priority flag, a plain (default-foreground) title for readability, and a
+	// section-colored trailing date/urgency. The selected row fills with the
+	// selection color. The "#NNN" token must stay intact for cursor-visibility
+	// lookups.
 	writeTasks := func(tasks []storage.Task, style lipgloss.Style, trailing func(storage.Task) string) {
 		for _, t := range tasks {
 			idx := len(m.reportTaskIDs)
 			m.reportTaskIDs = append(m.reportTaskIDs, t.ID)
-			marker := " "
-			rowStyle := style
-			if idx == m.reportCursor {
-				marker = "›"
-				rowStyle = m.styles.Selection
+			title := truncateTextWidth(t.Title, titleW)
+			flagCh := "⚐"
+			if t.Priority > 0 {
+				flagCh = "⚑"
 			}
-			prefix := fmt.Sprintf("%s ∙ #%-3d ", marker, t.ID)
-			flag := m.priorityBadge(t.Priority)
-			suffix := fmt.Sprintf(" %-*s  %s", titleW, truncateTextWidth(t.Title, titleW), trailing(t))
-			b.WriteString(rowStyle.Render(prefix))
-			b.WriteString(flag)
-			b.WriteString(rowStyle.Render(suffix))
+			if idx == m.reportCursor {
+				line := fmt.Sprintf(" ▌ ∙ #%-3d %s %-*s  %s", t.ID, flagCh, titleW, title, trailing(t))
+				b.WriteString(m.styles.Selection.Render(line))
+				b.WriteString("\n")
+				continue
+			}
+			b.WriteString(style.Render(" ▌"))
+			b.WriteString(m.styles.Muted.Render(fmt.Sprintf(" ∙ #%-3d ", t.ID)))
+			b.WriteString(m.priorityBadge(t.Priority))
+			b.WriteString(" ")
+			b.WriteString(fmt.Sprintf("%-*s", titleW, title))
+			b.WriteString("  ")
+			b.WriteString(style.Render(trailing(t)))
 			b.WriteString("\n")
 		}
 	}
 	dueTrail := func(t storage.Task) string { return localRelativeDue(t) + " · " + formatDateTime(t.Due) }
 
-	// At-a-glance summary: color-coded counts (red/amber/warning), or all-clear.
+	// At-a-glance summary: color-coded chips, or all-clear. The labels are short
+	// enough to fit narrow terminals and use the CJK-safe narrow ∙ separator.
 	var parts []string
 	if len(overdue) > 0 {
-		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("%d overdue", len(overdue))))
+		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("⚠ %d overdue", len(overdue))))
 	}
 	if len(todayList) > 0 {
-		parts = append(parts, m.styles.Accent.Render(fmt.Sprintf("%d due today", len(todayList))))
+		parts = append(parts, m.styles.Accent.Render(fmt.Sprintf("◆ %d today", len(todayList))))
 	}
 	if len(upcoming) > 0 {
-		parts = append(parts, m.styles.Warning.Render(fmt.Sprintf("%d in next %d days", len(upcoming), upcomingDays)))
+		parts = append(parts, m.styles.Warning.Render(fmt.Sprintf("▸ %d next %dd", len(upcoming), upcomingDays)))
+	}
+	if len(recurring) > 0 {
+		parts = append(parts, m.styles.Heading.Render(fmt.Sprintf("↻ %d recurring", len(recurring))))
 	}
 	if len(parts) == 0 {
-		parts = append(parts, m.styles.Success.Render("All clear, no due tasks"))
+		parts = append(parts, m.styles.Success.Render("✓ All clear — nothing due"))
 	}
 	b.WriteString("  " + strings.Join(parts, m.styles.Muted.Render("   ∙   ")))
-	b.WriteString("\n")
-	writeDivider()
+	b.WriteString("\n\n")
 
 	if len(overdue) > 0 {
-		writeSectionHeader("Overdue", len(overdue), m.styles.Danger)
+		writeSectionHeader("⚠", "Overdue", len(overdue), m.styles.Danger)
 		writeTasks(overdue, m.styles.Danger, dueTrail)
 		b.WriteString("\n")
 	}
 	if len(todayList) > 0 {
-		writeSectionHeader("Due Today", len(todayList), m.styles.Accent)
+		writeSectionHeader("◆", "Due Today", len(todayList), m.styles.Accent)
 		writeTasks(todayList, m.styles.Accent, dueTrail)
 		b.WriteString("\n")
 	}
 	if len(upcoming) > 0 {
-		writeSectionHeader(fmt.Sprintf("Upcoming (next %d days)", upcomingDays), len(upcoming), m.styles.Warning)
+		writeSectionHeader("▸", fmt.Sprintf("Upcoming (next %d days)", upcomingDays), len(upcoming), m.styles.Warning)
 		grouped := map[string][]storage.Task{}
 		var days []time.Time
 		seen := map[string]bool{}
@@ -1990,7 +2096,7 @@ func (m *Model) refreshReport() {
 		b.WriteString("\n")
 	}
 	if len(recurring) > 0 {
-		writeSectionHeader("Recurring", len(recurring), m.styles.Heading)
+		writeSectionHeader("↻", "Recurring", len(recurring), m.styles.Heading)
 		writeTasks(recurring, m.styles.Warning, func(t storage.Task) string {
 			s := "[" + recurrenceRuleLabel(t) + "]"
 			if nextDate, ok := nextRecurrenceDate(t); ok {
@@ -2002,14 +2108,14 @@ func (m *Model) refreshReport() {
 	}
 
 	writeDivider()
-	writeSectionHeader("Recently Added", len(recentAdd), m.styles.Heading)
+	writeSectionHeader("＋", "Recently Added", len(recentAdd), m.styles.Heading)
 	if len(recentAdd) == 0 {
 		b.WriteString(m.styles.Muted.Render("  (none)") + "\n")
 	} else {
 		writeTasks(recentAdd, m.styles.Muted, func(t storage.Task) string { return "added " + t.CreatedAt.Format("2006-01-02") })
 	}
 	b.WriteString("\n")
-	writeSectionHeader("Recently Done", len(recentDone), m.styles.Heading)
+	writeSectionHeader("✓", "Recently Done", len(recentDone), m.styles.Heading)
 	if len(recentDone) == 0 {
 		b.WriteString(m.styles.Muted.Render("  (none)") + "\n")
 	} else {
@@ -2085,7 +2191,7 @@ func (m Model) renderMetadataPanel() string {
 		rows[2].value = emptyPlaceholder(task.Tags)
 		rows[3].value = emptyPlaceholder(task.Assignee)
 		rows[4].value = emptyPlaceholder(task.Reporter)
-		rows[5].value = m.priorityBadge(task.Priority)
+		rows[5].value = m.priorityCell(task.Priority)
 		rows[6].value = emptyPlaceholder(formatDateTime(task.Due))
 		if task.Due.Valid {
 			if name, ok := m.holidayName(normalizeDate(task.Due.Time)); ok && name != "" {
@@ -2239,7 +2345,7 @@ func (m Model) noteMetaBlockLines() []string {
 			{label: "Tags", value: emptyPlaceholder(task.Tags)},
 			{label: "Assignee", value: emptyPlaceholder(task.Assignee)},
 			{label: "Reporter", value: emptyPlaceholder(task.Reporter)},
-			{label: "Priority", value: m.priorityBadge(task.Priority)},
+			{label: "Priority", value: m.priorityCell(task.Priority)},
 			{label: "Due", value: emptyPlaceholder(formatDateTime(task.Due))},
 			{label: "Start", value: emptyPlaceholder(formatDate(task.Start))},
 			{label: "End", value: emptyPlaceholder(formatDateTime(task.End))},
@@ -2793,6 +2899,17 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		cmd := strings.TrimSpace(m.input.Value())
 		m.pushCommandHistory(cmd)
 		cmdLower := strings.TrimPrefix(strings.ToLower(cmd), ":")
+		// "stage <name>" / "board <topic>" take an argument, so handle prefixes
+		// before the exact-match switch.
+		if arg, ok := strings.CutPrefix(cmdLower, "stage "); ok {
+			m.applyQuickFilter("stage:" + strings.TrimSpace(arg))
+			m.mode = modeList
+			m.input.Blur()
+			return m, nil
+		}
+		if arg, ok := strings.CutPrefix(cmdLower, "board"); ok {
+			return m.enterBoardView(strings.TrimSpace(strings.TrimPrefix(arg, " ")))
+		}
 		switch cmdLower {
 		case "q", "quit", "wq", "x":
 			return m, tea.Quit
@@ -2806,6 +2923,8 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			return m.enterGanttView()
 		case "stats":
 			return m.enterStatsView()
+		case "dashboard", "projects", "topics":
+			return m.enterDashboardView()
 		case "config":
 			return m.startConfig()
 		case "all", "clear", "reset", "overdue", "pending", "done", "completed", "progress", "in-progress", "today", "week":
@@ -2868,7 +2987,7 @@ func completeCommand(input string) string {
 		raw = strings.TrimPrefix(raw, ":")
 	}
 	cmd := strings.ToLower(raw)
-	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "help", "in-progress", "overdue", "pending", "quit", "stats", "today", "week"}
+	commands := []string{"agenda", "all", "board", "calendar", "config", "dashboard", "done", "gantt", "help", "in-progress", "overdue", "pending", "projects", "quit", "stage", "stats", "today", "week"}
 	if cmd == "" {
 		return prefix + commands[0]
 	}
@@ -3141,9 +3260,10 @@ func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
 	if newPrio < 0 {
 		newPrio = 0
 	}
-	if newPrio > 5 {
-		newPrio = 5
+	if newPrio > maxPriority {
+		newPrio = maxPriority
 	}
+	m.snapshotUndo(t, "priority change")
 	if err := m.store.UpdatePriority(t.ID, newPrio); err != nil {
 		m.status = fmt.Sprintf("priority failed: %v", err)
 		return m, nil
@@ -3152,7 +3272,11 @@ func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
 		m.tasks[idx].Priority = newPrio
 	}
 	m.pendingSort = true
-	m.status = fmt.Sprintf("Priority set to %d", newPrio)
+	if newPrio <= 0 {
+		m.status = "Priority cleared"
+	} else {
+		m.status = "Priority: " + priorityLabel(newPrio)
+	}
 	return m, nil
 }
 
@@ -3161,6 +3285,7 @@ func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	m.snapshotUndo(t, "due change")
 	if err := m.store.ShiftDue(t.ID, days); err != nil {
 		m.status = fmt.Sprintf("shift due failed: %v", err)
 		return m, nil
@@ -3204,8 +3329,8 @@ func (m *Model) sortTasks() {
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			a := m.tasks[i]
 			b := m.tasks[j]
-			if stateRank(a) != stateRank(b) {
-				return stateRank(a) < stateRank(b)
+			if m.stateRank(a) != m.stateRank(b) {
+				return m.stateRank(a) < m.stateRank(b)
 			}
 			if a.Due.Valid && b.Due.Valid {
 				if !a.Due.Time.Equal(b.Due.Time) {
@@ -3225,8 +3350,8 @@ func (m *Model) sortTasks() {
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			a := m.tasks[i]
 			b := m.tasks[j]
-			if stateRank(a) != stateRank(b) {
-				return stateRank(a) < stateRank(b)
+			if m.stateRank(a) != m.stateRank(b) {
+				return m.stateRank(a) < m.stateRank(b)
 			}
 			return a.ID < b.ID
 		})
@@ -3278,6 +3403,20 @@ func (m *Model) sortTasks() {
 			}
 			return m.tasks[i].ID < m.tasks[j].ID
 		})
+	case "stage":
+		// Order by position within the governing workflow; tasks with no workflow
+		// sort after those that have one, then by id for stability.
+		sort.SliceStable(m.tasks, func(i, j int) bool {
+			ri, oki := m.stagePosition(m.tasks[i])
+			rj, okj := m.stagePosition(m.tasks[j])
+			if oki != okj {
+				return oki // workflow-governed tasks first
+			}
+			if oki && ri != rj {
+				return ri < rj
+			}
+			return m.tasks[i].ID < m.tasks[j].ID
+		})
 	default:
 		sort.SliceStable(m.tasks, func(i, j int) bool {
 			return m.tasks[i].ID < m.tasks[j].ID
@@ -3299,12 +3438,23 @@ func topicSortKey(t storage.Task) string {
 	return strings.ToLower(strings.Join(t.Topics, ","))
 }
 
-func stateRank(t storage.Task) int {
+// stateRank orders tasks for the auto/state sorts: overdue first, then active,
+// then pending, then done. Under a custom workflow the "active vs pending"
+// distinction comes from the current stage's category.
+func (m Model) stateRank(t storage.Task) int {
 	if isDone(t) {
 		return 3
 	}
 	if isOverdue(t) {
 		return 0
+	}
+	if stages, ok := m.governingWorkflow(t); ok {
+		switch stages[currentStageIndex(stages, t.Status)].Category {
+		case storage.StagePending:
+			return 2
+		default: // active (done is handled by isDone above)
+			return 1
+		}
 	}
 	if t.Status == "IN-PROGRESS" {
 		return 1
@@ -3700,6 +3850,10 @@ func (m *Model) processSortKey(key string) bool {
 			m.applySortMode("state")
 			m.pendingSort = false
 			m.status = "Sorted by state (" + m.sortDirLabel() + ")"
+		case "w":
+			m.applySortMode("stage")
+			m.pendingSort = false
+			m.status = "Sorted by workflow stage (" + m.sortDirLabel() + ")"
 		default:
 			m.status = "Sort cancelled"
 		}
@@ -3708,7 +3862,7 @@ func (m *Model) processSortKey(key string) bool {
 	}
 	if key == "s" {
 		m.sortBuf = "s"
-		m.status = "Sort: d (due), p (priority), t (title), c (created), o (topic), a (auto), s (state) - repeat to reverse"
+		m.status = "Sort: d (due), p (priority), t (title), c (created), o (topic), w (stage), a (auto), s (state) - repeat to reverse"
 		return true
 	}
 	// reset buffer on other keys
@@ -3830,6 +3984,137 @@ func nextTaskStatus(t storage.Task) string {
 	default:
 		return "PENDING"
 	}
+}
+
+// governingWorkflow returns the workflow that governs a task's status — that of
+// its primary topic — and whether one exists. Tasks with no primary topic, or
+// whose primary topic has no custom workflow, fall back to legacy behavior.
+func (m Model) governingWorkflow(t storage.Task) ([]storage.Stage, bool) {
+	pt := strings.TrimSpace(t.PrimaryTopic)
+	if pt == "" {
+		return nil, false
+	}
+	stages := m.workflows[pt]
+	if len(stages) == 0 {
+		return nil, false
+	}
+	return stages, true
+}
+
+// stageIndex finds a status's position within an ordered workflow, or -1 when
+// the status isn't one of the workflow's stage names (e.g. a legacy value).
+func stageIndex(stages []storage.Stage, status string) int {
+	status = strings.TrimSpace(status)
+	for i, s := range stages {
+		if strings.EqualFold(s.Name, status) {
+			return i
+		}
+	}
+	return -1
+}
+
+// currentStageIndex resolves a task's stage within its workflow, mapping an
+// unknown/legacy status to the initial stage (index 0).
+func currentStageIndex(stages []storage.Stage, status string) int {
+	if idx := stageIndex(stages, status); idx >= 0 {
+		return idx
+	}
+	return 0
+}
+
+// taskStatusLabel returns the display label for a task's status, honoring its
+// governing workflow when one exists.
+func (m Model) taskStatusLabel(t storage.Task) string {
+	if stages, ok := m.governingWorkflow(t); ok {
+		return stages[currentStageIndex(stages, t.Status)].Name
+	}
+	return taskStatusLabel(t)
+}
+
+// nextTaskStatus returns the status a task rotates to next, honoring its
+// governing workflow (wrapping at the end) when one exists.
+func (m Model) nextTaskStatus(t storage.Task) string {
+	if stages, ok := m.governingWorkflow(t); ok {
+		idx := stageIndex(stages, t.Status)
+		if idx < 0 {
+			return stages[0].Name
+		}
+		return stages[(idx+1)%len(stages)].Name
+	}
+	return nextTaskStatus(t)
+}
+
+// stagePosition returns a task's index within its governing workflow and whether
+// one governs it. Used by the "stage" sort.
+func (m Model) stagePosition(t storage.Task) (int, bool) {
+	if stages, ok := m.governingWorkflow(t); ok {
+		return currentStageIndex(stages, t.Status), true
+	}
+	return 0, false
+}
+
+// stageCategory returns the category ("pending"/"active"/"done") of a task's
+// current stage. For legacy (no governing workflow) it derives the category
+// from the well-known status names.
+func (m Model) stageCategory(t storage.Task) string {
+	if stages, ok := m.governingWorkflow(t); ok {
+		return stages[currentStageIndex(stages, t.Status)].Category
+	}
+	switch strings.ToUpper(strings.TrimSpace(t.Status)) {
+	case "DONE":
+		return storage.StageDone
+	case "IN-PROGRESS":
+		return storage.StageActive
+	default:
+		return storage.StagePending
+	}
+}
+
+// statusMeansDone reports whether a given status value marks the task complete
+// under its governing workflow (a done-category stage), or legacy "DONE".
+func (m Model) statusMeansDone(t storage.Task, status string) bool {
+	if stages, ok := m.governingWorkflow(t); ok {
+		return stages[currentStageIndex(stages, status)].Category == storage.StageDone
+	}
+	return strings.EqualFold(strings.TrimSpace(status), "DONE")
+}
+
+// firstTopic returns the first topic in a comma-separated topic field — the one
+// that governs the task's status workflow.
+func firstTopic(raw string) string {
+	for _, part := range strings.Split(raw, ",") {
+		if t := strings.TrimSpace(part); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// orderTopicsPrimaryFirst returns topics with the primary topic moved to the
+// front, so the modal's Topic field round-trips which topic is primary.
+func orderTopicsPrimaryFirst(topics []string, primary string) []string {
+	primary = strings.TrimSpace(primary)
+	if primary == "" {
+		return topics
+	}
+	found := false
+	for _, t := range topics {
+		if strings.EqualFold(strings.TrimSpace(t), primary) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return topics
+	}
+	out := make([]string, 0, len(topics))
+	out = append(out, primary)
+	for _, t := range topics {
+		if !strings.EqualFold(strings.TrimSpace(t), primary) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func topicListLabel(topics []string) string {
@@ -4116,6 +4401,7 @@ type listItem struct {
 type topicStat struct {
 	overdue int
 	total   int
+	done    int
 }
 
 func (m Model) recentlyAdded(limit int) []storage.Task {
@@ -4213,6 +4499,14 @@ func (m *Model) applyQuickFilter(cmd string) {
 
 func normalizeQuickFilter(v string) string {
 	v = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), ":")
+	// "stage:<name>" filters by a custom workflow stage; keep the name intact.
+	if rest, ok := strings.CutPrefix(v, "stage:"); ok {
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			return "all"
+		}
+		return "stage:" + rest
+	}
 	switch v {
 	case "", "all", "clear", "reset":
 		return "all"
@@ -4236,23 +4530,31 @@ func (m Model) applyQuickFilterToItems(candidates []listItem) []listItem {
 	}
 	items := make([]listItem, 0, len(candidates))
 	for _, it := range candidates {
-		if it.kind != itemTask || taskMatchesQuickFilter(it.task, filter) {
+		if it.kind != itemTask || m.taskMatchesQuickFilter(it.task, filter) {
 			items = append(items, it)
 		}
 	}
 	return items
 }
 
-func taskMatchesQuickFilter(t storage.Task, filter string) bool {
-	switch normalizeQuickFilter(filter) {
+func (m Model) taskMatchesQuickFilter(t storage.Task, filter string) bool {
+	norm := normalizeQuickFilter(filter)
+	if name, ok := strings.CutPrefix(norm, "stage:"); ok {
+		stages, hasWF := m.governingWorkflow(t)
+		if !hasWF {
+			return false
+		}
+		return strings.EqualFold(stages[currentStageIndex(stages, t.Status)].Name, name)
+	}
+	switch norm {
 	case "overdue":
 		return isOverdue(t)
 	case "pending":
-		return !isDone(t) && strings.ToUpper(strings.TrimSpace(t.Status)) == "PENDING"
+		return !isDone(t) && m.stageCategory(t) == storage.StagePending
 	case "done":
 		return isDone(t)
 	case "in-progress":
-		return !isDone(t) && strings.ToUpper(strings.TrimSpace(t.Status)) == "IN-PROGRESS"
+		return !isDone(t) && m.stageCategory(t) == storage.StageActive
 	case "today":
 		return !isDone(t) && t.Due.Valid && normalizeDate(t.Due.Time).Equal(normalizeDate(time.Now()))
 	case "week":
@@ -4368,12 +4670,14 @@ func taskSearchFields(t storage.Task) []string {
 		fmt.Sprintf("#%d", t.ID),
 		fmt.Sprintf("id:%d", t.ID),
 		taskStatusLabel(t),
+		t.Status,
 		strings.Join(t.Topics, " "),
 		t.Tags,
 		t.Assignee,
 		t.Reporter,
 		fmt.Sprintf("priority:%d", t.Priority),
 		fmt.Sprintf("p%d", t.Priority),
+		priorityLabel(t.Priority),
 		t.Timezone,
 		t.Notes,
 	}
@@ -4436,16 +4740,48 @@ func (m Model) topicStats() map[string]topicStat {
 			continue
 		}
 		overdue := isOverdue(t)
+		done := isDone(t)
 		for _, topic := range uniqueTopics(t.Topics) {
 			stat := stats[topic]
 			stat.total++
 			if overdue {
 				stat.overdue++
 			}
+			if done {
+				stat.done++
+			}
 			stats[topic] = stat
 		}
 	}
 	return stats
+}
+
+// stageCount pairs a workflow stage with how many tasks currently sit in it.
+type stageCount struct {
+	Stage storage.Stage
+	Count int
+}
+
+// topicStageStats returns the per-stage task distribution for a topic's custom
+// workflow. Only tasks whose primary topic is this topic are counted (those are
+// the ones the workflow governs); an unknown/legacy status maps to the initial
+// stage. Returns nil when the topic has no workflow.
+func (m Model) topicStageStats(topic string) []stageCount {
+	stages := m.workflows[strings.TrimSpace(topic)]
+	if len(stages) == 0 {
+		return nil
+	}
+	counts := make([]stageCount, len(stages))
+	for i, s := range stages {
+		counts[i] = stageCount{Stage: s}
+	}
+	for _, t := range m.tasks {
+		if strings.TrimSpace(t.PrimaryTopic) != strings.TrimSpace(topic) {
+			continue
+		}
+		counts[currentStageIndex(stages, t.Status)].Count++
+	}
+	return counts
 }
 
 func (m Model) sortedTopics() []string {

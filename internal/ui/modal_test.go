@@ -91,6 +91,14 @@ func newModelForTest(store *storage.Store, cfg config.Config, tasks []storage.Ta
 		styles:        buildStyles(cfg.Theme),
 		width:         96,
 		height:        30,
+		workflows:     map[string][]storage.Stage{},
+		topicMeta:     map[string]storage.TopicMeta{},
+	}
+	if wf, err := store.AllTopicWorkflows(); err == nil {
+		m.workflows = wf
+	}
+	if tm, err := store.AllTopicMeta(); err == nil {
+		m.topicMeta = tm
 	}
 	ti := textinput.New()
 	ti.Prompt = ""
@@ -266,7 +274,10 @@ func TestDueStepper(t *testing.T) {
 	}
 	res, _ = m.updateMetadataMode("+", keyRunes("+"))
 	m = res.(Model)
-	want := today.AddDate(0, 1, 1).Format("2006-01-02")
+	// The stepper applied day+ then month+, so mirror that order here. Computing
+	// today.AddDate(0,1,1) instead diverges at month-end boundaries (e.g. when
+	// "today" is the 30th/31st) because Go normalizes overflowing days.
+	want := today.AddDate(0, 0, 1).AddDate(0, 1, 0).Format("2006-01-02")
 	if got := m.dueTime(now).Format("2006-01-02"); got != want {
 		t.Fatalf("after month +: want %s, got %s", want, got)
 	}

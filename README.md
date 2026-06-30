@@ -59,12 +59,17 @@ Quick filter commands:
 
 ## Daily Use
 
-- Status: `r` rotates `PENDING` → `IN-PROGRESS` → `DONE`.
+- Status: `r` rotates the task through its status pipeline. By default that is
+  `PENDING` → `IN-PROGRESS` → `DONE`, but a project (topic) can define its own
+  workflow — see **Projects & custom workflows** below.
 - Delete to trash: `D` (`X` deletes all done).
 - Edit / rename: `e` opens the metadata editor.
-- Priority: `+` / `-` (max 5).
+- Priority: `+` / `-` cycles None → Low → Med → High (green / amber / red flag).
 - Due shift: `]` / `[` (+1d/-1d).
-- Sort: `s` then `d/p/t/c/o/a/s` (due/priority/title/created/topic/auto/state).
+- Undo: `u` reverts the last in-place edit (status, priority, due, or metadata).
+  Deletes are recovered from the Trash (`T`) instead.
+- Sort: `s` then `d/p/t/c/o/w/a/s`
+  (due/priority/title/created/topic/stage/auto/state).
 - `gg` / `G` bindings (jump to top / bottom)
 - Quick filters: use commands like `:overdue`, `:pending`, `:today`, `:week`,
   and `:all` to clear.
@@ -76,6 +81,33 @@ Quick filter commands:
 - Other views: `:calendar` (month grid) and `:gantt` (timeline).
 - From a filtered/searched/topic-scoped list, `Esc` or `q` returns to the
   original list; when already on the original list, `q` quits.
+
+## Projects & custom workflows
+
+Topics double as **projects**. Open the project dashboard with `:dashboard`
+(aliases `:projects`, `:topics`) to manage them:
+
+- **Scope** to a project with `Enter` (filters the task list to that topic).
+- **Custom status workflow** with `w`: define an ordered pipeline of stages, e.g.
+  a thesis project with `writing → review → submission → rebuttal`. In the editor:
+  `a` add, `e` rename, `c` cycle a stage's category, `J`/`K` reorder, `D` delete,
+  `s` save (`Esc` also saves and closes).
+- Each stage has a **category** — `pending`, `active`, or `done` — which drives
+  its color. Mark the terminal stage `done`; rotating a task into it completes
+  the task (sets its completion time), just like the built-in `DONE`.
+- **Project metadata**: `e` edits the description, `t` sets a target date, `a`
+  toggles archived. The dashboard shows each project's completion bar, overdue
+  count, and stage funnel.
+- **Kanban board**: `:board` (or `:board <topic>`) opens a column-per-stage board
+  for the scoped project. `h`/`l` move between columns, `j`/`k` between tasks,
+  and `L`/`H` advance a task to the next stage or send it back.
+- **Stage filter & sort**: `:stage <name>` filters the list to a single workflow
+  stage; sort by pipeline position with `s` then `w`.
+
+A task's workflow is governed by its **primary topic** — the *first* topic listed
+on the task. Other topics remain plain labels. Tasks whose primary topic has no
+custom workflow keep the default `PENDING`/`IN-PROGRESS`/`DONE` behavior, so
+existing tasks are unaffected.
 
 ## Recurrence Syntax
 
@@ -125,6 +157,25 @@ Options:
 
 ```
 ./install.sh --prefix /usr/local --bin-name bada
+```
+
+The installer does a clean rebuild every time and warns if another `bada`
+earlier on your `PATH` (e.g. a stale copy in `~/go/bin` or `~/.local/bin`)
+would shadow the freshly built binary — that is the usual cause of an "old
+version keeps running" after an update.
+
+## Uninstall (Linux)
+
+```
+./uninstall.sh
+```
+
+Removes the installed binary, the local build artifact, and any other `bada`
+copies found on your `PATH`. Use the same `--prefix`/`--bin-name` you installed
+with. To also delete user data (config, DB, and trash):
+
+```
+./uninstall.sh --purge
 ```
 
 

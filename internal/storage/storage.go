@@ -21,6 +21,7 @@ type Task struct {
 	Status             string
 	Done               bool
 	Topics             []string
+	PrimaryTopic       string
 	Timezone           string
 	Tags               string
 	Assignee           string
@@ -42,6 +43,44 @@ type Store struct {
 	trashDir string
 }
 
+// Stage is one step in a topic's custom status workflow. Category is one of
+// "pending", "active", or "done" and drives both display color and whether a
+// task entering the stage is considered complete.
+type Stage struct {
+	Name     string
+	Category string
+}
+
+// TopicMeta holds project-level metadata for a topic (the per-topic notes plus
+// description, an optional target date, and an archived flag).
+type TopicMeta struct {
+	Topic       string
+	Description string
+	TargetDate  sql.NullTime
+	Archived    bool
+	Notes       string
+}
+
+// Stage category constants.
+const (
+	StagePending = "pending"
+	StageActive  = "active"
+	StageDone    = "done"
+)
+
+// normalizeStageCategory clamps an arbitrary string to a known stage category,
+// defaulting to "active".
+func normalizeStageCategory(cat string) string {
+	switch strings.ToLower(strings.TrimSpace(cat)) {
+	case StagePending:
+		return StagePending
+	case StageDone:
+		return StageDone
+	default:
+		return StageActive
+	}
+}
+
 type TrashEntry struct {
 	Path      string
 	DeletedAt time.Time
@@ -53,7 +92,7 @@ type rowScanner interface {
 }
 
 func taskSelectSQL(suffix string) string {
-	return `SELECT id, title, done, status, tags, assignee, reporter, due, start_at, end_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at, completed_at FROM tasks ` + suffix
+	return `SELECT id, title, done, status, tags, assignee, reporter, due, start_at, end_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, primary_topic, created_at, completed_at FROM tasks ` + suffix
 }
 
 func Open(dbPath, trashDir string) (*Store, error) {
@@ -131,10 +170,27 @@ CREATE TABLE IF NOT EXISTS tasks (
 	if err := s.ensureTaskTopics(); err != nil {
 		return err
 	}
+	if err := s.ensureTopicStages(); err != nil {
+		return err
+	}
 	if err := s.dropLegacyTopicColumn(); err != nil {
 		return err
 	}
 	return s.ensureTopicNoteColumns()
+}
+
+func (s *Store) ensureTopicStages() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS topic_stages (
+	topic TEXT NOT NULL,
+	position INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	category TEXT NOT NULL DEFAULT 'active',
+	PRIMARY KEY (topic, position)
+);`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_topic_stages_topic ON topic_stages(topic);`)
+	return err
 }
 
 func (s *Store) ensureTaskColumns() error {
@@ -151,6 +207,7 @@ func (s *Store) ensureTaskColumns() error {
 		"recurrence_interval": "ALTER TABLE tasks ADD COLUMN recurrence_interval INTEGER NOT NULL DEFAULT 0;",
 		"completed_at":        "ALTER TABLE tasks ADD COLUMN completed_at TEXT DEFAULT NULL;",
 		"notes":               "ALTER TABLE tasks ADD COLUMN notes TEXT DEFAULT '';",
+		"primary_topic":       "ALTER TABLE tasks ADD COLUMN primary_topic TEXT DEFAULT '';",
 	}
 	existing := map[string]struct{}{}
 	rows, err := s.db.Query(`PRAGMA table_info(tasks);`)
@@ -177,6 +234,10 @@ func (s *Store) ensureTaskColumns() error {
 		}
 	}
 	if _, err := s.db.Exec(`UPDATE tasks SET status = 'DONE' WHERE done = 1 AND (status = '' OR status = 'PENDING');`); err != nil {
+		return err
+	}
+	// Priority is now a 3-level scale; clamp any legacy 4/5 values down to High.
+	if _, err := s.db.Exec(`UPDATE tasks SET priority = ? WHERE priority > ?;`, maxPriority, maxPriority); err != nil {
 		return err
 	}
 	return rows.Err()
@@ -231,7 +292,10 @@ func (s *Store) dropLegacyTopicColumn() error {
 
 func (s *Store) ensureTopicNoteColumns() error {
 	required := map[string]string{
-		"notes": "ALTER TABLE topic_notes ADD COLUMN notes TEXT NOT NULL DEFAULT '';",
+		"notes":       "ALTER TABLE topic_notes ADD COLUMN notes TEXT NOT NULL DEFAULT '';",
+		"description": "ALTER TABLE topic_notes ADD COLUMN description TEXT DEFAULT '';",
+		"target_date": "ALTER TABLE topic_notes ADD COLUMN target_date TEXT DEFAULT NULL;",
+		"archived":    "ALTER TABLE topic_notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;",
 	}
 	existing := map[string]struct{}{}
 	rows, err := s.db.Query(`PRAGMA table_info(topic_notes);`)
@@ -312,12 +376,25 @@ func (s *Store) SetDone(id int, done bool) error {
 	return err
 }
 
-func (s *Store) SetStatus(id int, status string) error {
-	status = normalizeTaskStatus(status, false)
-	done := status == "DONE"
+// SetStatus updates a task's status string and its done flag. The caller decides
+// done-ness because, with custom per-topic workflows, whether a status means
+// "complete" depends on the governing topic's stage category — knowledge that
+// lives in the UI layer, not storage. completed_at is stamped only on the
+// transition into done and cleared when leaving done.
+func (s *Store) SetStatus(id int, status string, done bool) error {
+	status = normalizeTaskStatus(status, done)
+	var prevDone int
+	var prevCompleted sql.NullString
+	if err := s.db.QueryRow(`SELECT done, completed_at FROM tasks WHERE id = ?;`, id).Scan(&prevDone, &prevCompleted); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	completed := sql.NullString{}
 	if done {
-		completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
+		if prevDone == 1 && prevCompleted.Valid {
+			completed = prevCompleted // already done; preserve original completion time
+		} else {
+			completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
+		}
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET status = ?, done = ?, completed_at = ? WHERE id = ?;`, status, boolToInt(done), completed, id)
 	return err
@@ -398,8 +475,27 @@ SELECT task_id, ? FROM task_topics WHERE topic = ?;`, newName, oldName)
 		tx.Rollback()
 		return 0, err
 	}
+	// Carry the custom workflow to the new name (keep any stages the new topic
+	// already had), then drop the old rows.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO topic_stages (topic, position, name, category)
+SELECT ?, position, name, category FROM topic_stages WHERE topic = ?;`, newName, oldName); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM topic_stages WHERE topic = ?;`, oldName); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET primary_topic = ? WHERE primary_topic = ?;`, newName, oldName); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if err := s.renameTopicMeta(oldName, newName); err != nil {
+		rows, _ := res.RowsAffected()
+		return rows, err
 	}
 	if err := s.renameTopicNote(oldName, newName); err != nil {
 		rows, _ := res.RowsAffected()
@@ -408,10 +504,45 @@ SELECT task_id, ? FROM task_topics WHERE topic = ?;`, newName, oldName)
 	return res.RowsAffected()
 }
 
+// renameTopicMeta carries description/target/archived to the new topic name when
+// the new name has no metadata of its own yet. Notes are handled separately by
+// renameTopicNote (which merges them).
+func (s *Store) renameTopicMeta(oldName, newName string) error {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || oldName == newName {
+		return nil
+	}
+	oldMeta, err := s.TopicMeta(oldName)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(oldMeta.Description) == "" && !oldMeta.TargetDate.Valid && !oldMeta.Archived {
+		return nil
+	}
+	newMeta, err := s.TopicMeta(newName)
+	if err != nil {
+		return err
+	}
+	// Don't clobber metadata the destination topic already has.
+	if strings.TrimSpace(newMeta.Description) == "" && !newMeta.TargetDate.Valid && !newMeta.Archived {
+		return s.UpdateTopicMeta(newName, oldMeta.Description, oldMeta.TargetDate, oldMeta.Archived)
+	}
+	return nil
+}
+
 func (s *Store) DeleteTopic(topic string) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM task_topics WHERE topic = ?;`, topic)
 	if err != nil {
 		return 0, err
+	}
+	if _, err := s.db.Exec(`UPDATE tasks SET primary_topic = '' WHERE primary_topic = ?;`, topic); err != nil {
+		rows, _ := res.RowsAffected()
+		return rows, err
+	}
+	if err := s.DeleteTopicWorkflow(topic); err != nil {
+		rows, _ := res.RowsAffected()
+		return rows, err
 	}
 	if err := s.DeleteTopicNote(topic); err != nil {
 		rows, _ := res.RowsAffected()
@@ -425,12 +556,16 @@ func (s *Store) UpdateTitle(id int, title string) error {
 	return err
 }
 
+// maxPriority is the highest priority level (3-level scale: 0 none, 1 Low,
+// 2 Med, 3 High). Kept in sync with the UI's maxPriority.
+const maxPriority = 3
+
 func (s *Store) UpdatePriority(id int, priority int) error {
 	if priority < 0 {
 		priority = 0
 	}
-	if priority > 5 {
-		priority = 5
+	if priority > maxPriority {
+		priority = maxPriority
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET priority = ? WHERE id = ?;`, priority, id)
 	return err
@@ -536,6 +671,198 @@ func (s *Store) DeleteTopicNote(topic string) error {
 	return err
 }
 
+// TopicWorkflow returns the ordered stages defined for a topic, or an empty
+// slice when the topic has no custom workflow.
+func (s *Store) TopicWorkflow(topic string) ([]Stage, error) {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT name, category FROM topic_stages WHERE topic = ? ORDER BY position;`, topic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var stages []Stage
+	for rows.Next() {
+		var st Stage
+		if err := rows.Scan(&st.Name, &st.Category); err != nil {
+			return nil, err
+		}
+		st.Category = normalizeStageCategory(st.Category)
+		stages = append(stages, st)
+	}
+	return stages, rows.Err()
+}
+
+// AllTopicWorkflows loads every topic's workflow in a single query.
+func (s *Store) AllTopicWorkflows() (map[string][]Stage, error) {
+	rows, err := s.db.Query(`SELECT topic, name, category FROM topic_stages ORDER BY topic, position;`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]Stage{}
+	for rows.Next() {
+		var topic string
+		var st Stage
+		if err := rows.Scan(&topic, &st.Name, &st.Category); err != nil {
+			return nil, err
+		}
+		st.Category = normalizeStageCategory(st.Category)
+		out[topic] = append(out[topic], st)
+	}
+	return out, rows.Err()
+}
+
+// SetTopicWorkflow replaces a topic's workflow with the given ordered stages.
+// Passing no stages clears the workflow.
+func (s *Store) SetTopicWorkflow(topic string, stages []Stage) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic is empty")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := s.setTopicWorkflowTx(tx, topic, stages); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) setTopicWorkflowTx(tx *sql.Tx, topic string, stages []Stage) error {
+	if _, err := tx.Exec(`DELETE FROM topic_stages WHERE topic = ?;`, topic); err != nil {
+		return err
+	}
+	pos := 0
+	for _, st := range stages {
+		name := strings.TrimSpace(st.Name)
+		if name == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO topic_stages (topic, position, name, category) VALUES (?, ?, ?, ?);`,
+			topic, pos, name, normalizeStageCategory(st.Category)); err != nil {
+			return err
+		}
+		pos++
+	}
+	return nil
+}
+
+// DeleteTopicWorkflow removes a topic's custom workflow.
+func (s *Store) DeleteTopicWorkflow(topic string) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM topic_stages WHERE topic = ?;`, topic)
+	return err
+}
+
+// TopicMeta returns the project-level metadata for a topic, with notes folded in.
+func (s *Store) TopicMeta(topic string) (TopicMeta, error) {
+	topic = strings.TrimSpace(topic)
+	meta := TopicMeta{Topic: topic}
+	if topic == "" {
+		return meta, nil
+	}
+	var notes, desc, target sql.NullString
+	var archived sql.NullInt64
+	err := s.db.QueryRow(`SELECT notes, description, target_date, archived FROM topic_notes WHERE topic = ?;`, topic).
+		Scan(&notes, &desc, &target, &archived)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return meta, nil
+		}
+		return meta, err
+	}
+	meta.Notes = notes.String
+	meta.Description = desc.String
+	meta.Archived = archived.Int64 == 1
+	if target.Valid {
+		if parsed := parseTimeWithFallback(target.String); !parsed.IsZero() {
+			meta.TargetDate = sql.NullTime{Time: parsed, Valid: true}
+		}
+	}
+	return meta, nil
+}
+
+// AllTopicMeta loads metadata for every topic that has a topic_notes row.
+func (s *Store) AllTopicMeta() (map[string]TopicMeta, error) {
+	rows, err := s.db.Query(`SELECT topic, notes, description, target_date, archived FROM topic_notes;`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]TopicMeta{}
+	for rows.Next() {
+		var topic string
+		var notes, desc, target sql.NullString
+		var archived sql.NullInt64
+		if err := rows.Scan(&topic, &notes, &desc, &target, &archived); err != nil {
+			return nil, err
+		}
+		meta := TopicMeta{Topic: topic, Notes: notes.String, Description: desc.String, Archived: archived.Int64 == 1}
+		if target.Valid {
+			if parsed := parseTimeWithFallback(target.String); !parsed.IsZero() {
+				meta.TargetDate = sql.NullTime{Time: parsed, Valid: true}
+			}
+		}
+		out[topic] = meta
+	}
+	return out, rows.Err()
+}
+
+// UpdateTopicMeta upserts the description, target date, and archived flag for a
+// topic without disturbing its notes.
+func (s *Store) UpdateTopicMeta(topic, description string, targetDate sql.NullTime, archived bool) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic is empty")
+	}
+	target := nullTimeToString(targetDate)
+	_, err := s.db.Exec(`INSERT INTO topic_notes (topic, notes, description, target_date, archived) VALUES (?, '', ?, ?, ?)
+ON CONFLICT(topic) DO UPDATE SET description = excluded.description, target_date = excluded.target_date, archived = excluded.archived;`,
+		topic, description, target, boolToInt(archived))
+	return err
+}
+
+// SetPrimaryTopic assigns the topic whose workflow governs a task's status.
+func (s *Store) SetPrimaryTopic(taskID int, topic string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET primary_topic = ? WHERE id = ?;`, strings.TrimSpace(topic), taskID)
+	return err
+}
+
+// OverwriteTask replaces every mutable field of an existing task row (including
+// its topics) with the given snapshot. It's the basis for single-level undo:
+// capture a Task before an edit, then OverwriteTask to revert. The row must
+// still exist (deletes are reverted via the trash, not this method).
+func (s *Store) OverwriteTask(t Task) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE tasks SET title = ?, done = ?, status = ?, tags = ?, assignee = ?, reporter = ?,
+due = ?, start_at = ?, end_at = ?, timezone = ?, priority = ?, recurring = ?, recurrence_rule = ?,
+recurrence_interval = ?, notes = ?, primary_topic = ?, completed_at = ? WHERE id = ?;`,
+		t.Title, boolToInt(t.Done), normalizeTaskStatus(t.Status, t.Done), t.Tags, t.Assignee, t.Reporter,
+		nullTimeToString(t.Due), nullTimeToString(t.Start), nullTimeToString(t.End), t.Timezone, t.Priority,
+		boolToInt(t.Recurring), t.RecurrenceRule, t.RecurrenceInterval, t.Notes, t.PrimaryTopic,
+		nullTimeToString(t.CompletedAt), t.ID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.setTaskTopicsTx(tx, t.ID, t.Topics); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ListTrash() ([]TrashEntry, error) {
 	entries := []TrashEntry{}
 	dirEntries, err := os.ReadDir(s.trashDir)
@@ -583,9 +910,11 @@ func (s *Store) RestoreTrash(entries []TrashEntry) error {
 	}
 	for _, e := range entries {
 		task := e.Task
+		// Trust the trashed task's own done flag: a custom done-stage status
+		// (e.g. "rebuttal") is not literally "DONE" yet still completed.
 		status := normalizeTaskStatus(task.Status, task.Done)
-		res, err := tx.Exec(`INSERT INTO tasks (title, done, status, tags, assignee, reporter, due, start_at, end_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			task.Title, boolToInt(status == "DONE"), status, task.Tags, task.Assignee, task.Reporter, nullTimeToString(task.Due), nullTimeToString(task.Start), nullTimeToString(task.End), task.Timezone, task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.CreatedAt.Format(time.RFC3339))
+		res, err := tx.Exec(`INSERT INTO tasks (title, done, status, tags, assignee, reporter, due, start_at, end_at, timezone, priority, recurring, recurrence_rule, recurrence_interval, notes, primary_topic, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			task.Title, boolToInt(task.Done), status, task.Tags, task.Assignee, task.Reporter, nullTimeToString(task.Due), nullTimeToString(task.Start), nullTimeToString(task.End), task.Timezone, task.Priority, boolToInt(task.Recurring), task.RecurrenceRule, task.RecurrenceInterval, task.Notes, task.PrimaryTopic, task.CreatedAt.Format(time.RFC3339))
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -664,7 +993,7 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 
 func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.status, tasks.tags, tasks.assignee, tasks.reporter, tasks.due, tasks.start_at, tasks.end_at, tasks.timezone, tasks.priority,
-tasks.recurring, tasks.recurrence_rule, tasks.recurrence_interval, tasks.notes, tasks.created_at, tasks.completed_at
+tasks.recurring, tasks.recurrence_rule, tasks.recurrence_interval, tasks.notes, tasks.primary_topic, tasks.created_at, tasks.completed_at
 FROM tasks
 INNER JOIN task_topics ON tasks.id = task_topics.task_id
 WHERE task_topics.topic = ?
@@ -839,12 +1168,15 @@ func scanTask(scanner rowScanner) (Task, error) {
 	var doneInt, priority, recurring int
 	var rule sql.NullString
 	var interval int
-	var status, notes, assignee, reporter sql.NullString
+	var status, notes, assignee, reporter, primaryTopic sql.NullString
 	var dueStr, startStr, endStr, completedStr sql.NullString
 	var createdStr string
 
-	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &status, &t.Tags, &assignee, &reporter, &dueStr, &startStr, &endStr, &t.Timezone, &priority, &recurring, &rule, &interval, &notes, &createdStr, &completedStr); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Title, &doneInt, &status, &t.Tags, &assignee, &reporter, &dueStr, &startStr, &endStr, &t.Timezone, &priority, &recurring, &rule, &interval, &notes, &primaryTopic, &createdStr, &completedStr); err != nil {
 		return Task{}, err
+	}
+	if primaryTopic.Valid {
+		t.PrimaryTopic = strings.TrimSpace(primaryTopic.String)
 	}
 	t.Done = doneInt == 1
 	t.Status = normalizeTaskStatus(status.String, t.Done)
@@ -894,20 +1226,24 @@ func scanTask(scanner rowScanner) (Task, error) {
 }
 
 func normalizeTaskStatus(status string, done bool) string {
-	status = strings.ToUpper(strings.TrimSpace(status))
-	status = strings.ReplaceAll(status, "_", "-")
-	switch status {
+	trimmed := strings.TrimSpace(status)
+	upper := strings.ReplaceAll(strings.ToUpper(trimmed), "_", "-")
+	switch upper {
 	case "DONE":
 		return "DONE"
 	case "IN-PROGRESS":
 		return "IN-PROGRESS"
 	case "PENDING":
 		return "PENDING"
-	default:
+	case "":
 		if done {
 			return "DONE"
 		}
 		return "PENDING"
+	default:
+		// Preserve custom workflow stage names verbatim rather than collapsing
+		// them to PENDING; they round-trip through scan and rotation.
+		return trimmed
 	}
 }
 
