@@ -145,27 +145,6 @@ func (m *Model) refreshReport() {
 	}
 	dueTrail := func(t storage.Task) string { return localRelativeDue(t) + " · " + formatDateTime(t.Due) }
 
-	// At-a-glance summary: color-coded chips, or all-clear. The labels are short
-	// enough to fit narrow terminals and use the CJK-safe narrow ∙ separator.
-	var parts []string
-	if len(overdue) > 0 {
-		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("⚠ %d overdue", len(overdue))))
-	}
-	if len(todayList) > 0 {
-		parts = append(parts, m.styles.Accent.Render(fmt.Sprintf("◆ %d today", len(todayList))))
-	}
-	if len(upcoming) > 0 {
-		parts = append(parts, m.styles.Warning.Render(fmt.Sprintf("▸ %d next %dd", len(upcoming), upcomingDays)))
-	}
-	if len(recurring) > 0 {
-		parts = append(parts, m.styles.Heading.Render(fmt.Sprintf("↻ %d recurring", len(recurring))))
-	}
-	if len(parts) == 0 {
-		parts = append(parts, m.styles.Success.Render("✓ All clear — nothing due"))
-	}
-	b.WriteString("  " + strings.Join(parts, m.styles.Muted.Render("   ∙   ")))
-	b.WriteString("\n\n")
-
 	if len(overdue) > 0 {
 		writeSectionHeader("⚠", "Overdue", len(overdue), m.styles.Danger)
 		writeTasks(overdue, m.styles.Danger, dueTrail)
@@ -242,7 +221,32 @@ func (m Model) renderReportHeader() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.styles.Heading.Render(fmt.Sprintf("  %s, it's %s", greetingForTime(now), now.Format("Monday, Jan 2"))))
 	b.WriteString("\n\n")
+	b.WriteString(m.renderAgendaFortune(now))
+	b.WriteString("\n\n\n")
 	return b.String()
+}
+
+func (m Model) renderAgendaFortune(now time.Time) string {
+	f := dailyIChingFortune(now)
+	inner := m.panelInnerWidth()
+	wrapW := inner - 4
+	if wrapW < 24 {
+		wrapW = inner
+	}
+
+	label := m.styles.Accent.Bold(true).Render("  Daily Lesson")
+	ruleW := inner - lipgloss.Width(label) - 1
+	if ruleW < 1 {
+		ruleW = 1
+	}
+	lesson := ichingDailyLesson(f)
+
+	lines := []string{label + m.styles.Border.Render(" "+strings.Repeat("─", ruleW))}
+	lessonStyle := m.styles.Muted.Italic(true)
+	for _, line := range strings.Split(wrapText(lesson, wrapW), "\n") {
+		lines = append(lines, m.styles.Accent.Render("  ▌ ")+lessonStyle.Render(line))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderReportFooter() string {

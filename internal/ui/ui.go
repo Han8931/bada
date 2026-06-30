@@ -30,6 +30,7 @@ const (
 	modeHelp
 	modeGantt
 	modeStats
+	modeFortune
 	modeDashboard
 	modeWorkflow
 	modeBoard
@@ -249,6 +250,7 @@ type Model struct {
 	ganttOffsetDays   int
 	helpScroll        int
 	statsScroll       int
+	fortuneScroll     int
 	configStage       configStage
 	pendingCfgPath    string
 	pendingDBPath     string
@@ -361,6 +363,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeStats {
 			return m.updateStatsMode(msg.String())
+		}
+		if m.mode == modeFortune {
+			return m.updateFortuneMode(msg.String())
 		}
 		if m.mode == modeDashboard {
 			return m.updateDashboardMode(msg.String(), msg)
@@ -715,6 +720,11 @@ func (m Model) View() string {
 
 	if m.mode == modeStats {
 		b.WriteString(m.renderStatsView())
+		return m.fillView(b.String())
+	}
+
+	if m.mode == modeFortune {
+		b.WriteString(m.renderFortuneView())
 		return m.fillView(b.String())
 	}
 

@@ -2582,6 +2582,8 @@ func (m Model) modeLabel() string {
 		return "GANTT"
 	case modeStats:
 		return "STATS"
+	case modeFortune:
+		return "LESSON"
 	default:
 		return "?"
 	}
