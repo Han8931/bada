@@ -41,7 +41,7 @@ func (m Model) updateDashboardMode(key string, msg tea.KeyMsg) (tea.Model, tea.C
 	switch key {
 	case "esc", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
-		m.status = "Dashboard closed"
+		m.status = "Projects closed"
 		return m, nil
 	case m.cfg.Keys.Up, "up", "k":
 		if m.dashboardCursor > 0 {

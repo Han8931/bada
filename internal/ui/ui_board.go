@@ -31,25 +31,25 @@ func (m Model) enterBoardView(topic string) (tea.Model, tea.Cmd) {
 		}
 	}
 	if topic == "" {
-		m.status = "No project has a workflow yet — open :dashboard and press w to define one"
+		m.status = "No project has a workflow yet — open :projects and press w to define one"
 		return m, nil
 	}
 	if len(m.workflows[topic]) == 0 {
-		m.status = fmt.Sprintf("%q has no workflow — define one with :dashboard → w", topic)
+		m.status = fmt.Sprintf("%q has no workflow — define one with :projects → w", topic)
 		return m, nil
 	}
 	m.boardTopic = topic
 	m.boardCol = 0
 	m.boardRow = 0
 	m.mode = modeBoard
-	m.status = "Board · " + topic
+	m.status = "Kanban · " + topic
 	if _, cols, ok := m.boardColumns(); ok {
 		total := 0
 		for _, c := range cols {
 			total += len(c)
 		}
 		if total == 0 {
-			m.status = "Board · " + topic + " — no tasks yet (make this the 1st topic on a task)"
+			m.status = "Kanban · " + topic + " — no tasks yet (make this the 1st topic on a task)"
 		}
 	}
 	return m, nil
@@ -120,7 +120,7 @@ func (m Model) updateBoardMode(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
-		m.status = "Board closed"
+		m.status = "Kanban closed"
 		return m, nil
 	case "left", "h":
 		if m.boardCol > 0 {
@@ -220,7 +220,7 @@ func (m Model) renderBoardView() string {
 		{"L/H", "advance/back"},
 		{m.cfg.Keys.Cancel, "close"},
 	})
-	return m.panel("bada ∙ Board ∙ "+m.boardTopic, m.boardContent()) + "\n" + footer
+	return m.panel("bada ∙ Kanban ∙ "+m.boardTopic, m.boardContent()) + "\n" + footer
 }
 
 func (m Model) boardContent() string {

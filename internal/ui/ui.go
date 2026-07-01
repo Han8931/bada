@@ -219,6 +219,7 @@ type Model struct {
 	currentTopic      string
 	searchQuery       string
 	searchFuzzy       bool
+	searchCursor      int // highlighted row in the live fuzzy-find preview
 	commandHistory    []string
 	commandHistoryIdx int
 	styles            uiStyles

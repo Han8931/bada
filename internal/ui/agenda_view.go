@@ -251,7 +251,7 @@ func (m *Model) refreshReport() {
 	if len(recentDone) == 0 {
 		b.WriteString(m.styles.Muted.Render("  (none)") + "\n")
 	} else {
-		writeTasks(recentDone, m.styles.Done, func(t storage.Task) string {
+		writeTasks(recentDone, m.styles.Success, func(t storage.Task) string {
 			if t.CompletedAt.Valid {
 				return "done " + t.CompletedAt.Time.Format("2006-01-02")
 			}

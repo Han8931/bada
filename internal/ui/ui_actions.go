@@ -84,8 +84,15 @@ func (m Model) renderNoteView() string {
 		headerLines = append(headerLines, metaLines...)
 		headerLines = append(headerLines, m.noteMetaSeparator(), "")
 	}
-	footerLine := m.styles.Muted.Render(fmt.Sprintf("Press %s/%s/enter to close, %s to edit, d to delete note",
-		m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit))
+	var hint string
+	if m.note.target.kind == noteTask {
+		hint = fmt.Sprintf("Press %s/%s/enter to close, %s to edit fields, n to edit note, d to delete note",
+			m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit)
+	} else {
+		hint = fmt.Sprintf("Press %s/%s/enter to close, %s to edit note, d to delete note",
+			m.cfg.Keys.Cancel, m.cfg.Keys.Quit, m.cfg.Keys.Edit)
+	}
+	footerLine := m.styles.Muted.Render(hint)
 
 	bodyLines := m.noteBodyLines()
 	available := m.noteAvailableHeight()
@@ -1386,25 +1393,37 @@ func (m Model) renderFuzzySearchModal() string {
 		boxInner = 32
 	}
 
-	query := strings.TrimSpace(m.input.Value())
-	candidates := m.applyQuickFilterToItems(m.defaultVisibleItems())
-	matches := filterItemsByQuery(candidates, query, true)
-	if query == "" {
-		matches = candidates
+	matches := m.fuzzyMatches()
+	total := len(matches)
+	cursor := 0
+	if total > 0 {
+		cursor = clampInt(m.searchCursor, 0, total-1)
 	}
-	maxResults := 8
-	if len(matches) < maxResults {
-		maxResults = len(matches)
+
+	// Window the results around the cursor so it stays visible.
+	start := 0
+	if cursor >= fuzzyVisibleRows {
+		start = cursor - fuzzyVisibleRows + 1
+	}
+	if start > total-fuzzyVisibleRows {
+		start = total - fuzzyVisibleRows
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + fuzzyVisibleRows
+	if end > total {
+		end = total
 	}
 
 	lines := []string{
 		m.styles.Accent.Render(padRightWidth("› "+m.input.View(), boxInner)),
-		m.styles.Muted.Render(padRightWidth(fmt.Sprintf("%d result(s) · Enter apply · Esc cancel", len(matches)), boxInner)),
+		m.styles.Muted.Render(padRightWidth(fmt.Sprintf("%d result(s) · ↑/↓ move · Enter jump · Esc cancel", total), boxInner)),
 	}
-	if maxResults == 0 {
+	if total == 0 {
 		lines = append(lines, m.styles.Muted.Render(padRightWidth("No matches", boxInner)))
 	} else {
-		for i := 0; i < maxResults; i++ {
+		for i := start; i < end; i++ {
 			it := matches[i]
 			if it.kind != itemTask {
 				continue
@@ -1412,7 +1431,7 @@ func (m Model) renderFuzzySearchModal() string {
 			status := m.taskStatusLabel(it.task)
 			line := fmt.Sprintf("#%-4d %-12s %s", it.task.ID, status, truncateText(it.task.Title, boxInner-19))
 			meta := "      " + truncateText(fuzzyResultMeta(it.task), boxInner-6)
-			if i == 0 {
+			if i == cursor {
 				lines = append(lines, m.styles.Selection.Render(padRightWidth(line, boxInner)))
 				lines = append(lines, m.styles.Selection.Render(padRightWidth(meta, boxInner)))
 			} else {
@@ -1738,6 +1757,44 @@ func (m Model) priorityCell(p int) string {
 	return m.priorityBadge(p) + " " + m.priorityStyle(p).Render(priorityLabel(p))
 }
 
+// statusCell renders a task's real status (or custom workflow stage) as a colored
+// badge for detail panels, with a separate "overdue" tag when applicable — so the
+// underlying status isn't masked the way the list's folded OVERDUE badge does.
+func (m Model) statusCell(t storage.Task) string {
+	var label string
+	switch {
+	case m.hasWorkflow(t):
+		stages, _ := m.governingWorkflow(t)
+		label = stages[currentStageIndex(stages, t.Status)].Name
+	case isDone(t):
+		label = "DONE"
+	case strings.EqualFold(strings.TrimSpace(t.Status), "IN-PROGRESS"):
+		label = "IN-PROGRESS"
+	default:
+		label = "PENDING"
+	}
+	cat := m.stageCategory(t)
+	var badge string
+	switch cat {
+	case storage.StageDone:
+		badge = m.styles.StatusDone.Render(" " + label + " ")
+	case storage.StagePending:
+		badge = m.styles.StatusPending.Render(label)
+	default:
+		badge = m.styles.StatusProgress.Render(" " + label + " ")
+	}
+	if cat != storage.StageDone && isOverdue(t) {
+		badge += " " + m.styles.StatusOverdue.Render(" overdue ")
+	}
+	return badge
+}
+
+// hasWorkflow reports whether a task is governed by a custom workflow.
+func (m Model) hasWorkflow(t storage.Task) bool {
+	_, ok := m.governingWorkflow(t)
+	return ok
+}
+
 // priorityField returns the fixed 4-wide task-list cell for a priority, colored
 // only when the surrounding row isn't itself recolored (selection/done), so the
 // flag's color never fights the row highlight.
@@ -1926,6 +1983,7 @@ func (m Model) renderMetadataPanel() string {
 	}
 	rows := []row{
 		{label: "Title", value: ""},
+		{label: "Status", value: ""},
 		{label: "Topics", value: ""},
 		{label: "Tags", value: ""},
 		{label: "Assignee", value: ""},
@@ -1939,28 +1997,29 @@ func (m Model) renderMetadataPanel() string {
 	}
 	if ok {
 		rows[0].value = task.Title
-		rows[1].value = emptyPlaceholder(strings.Join(task.Topics, ", "))
-		rows[2].value = emptyPlaceholder(task.Tags)
-		rows[3].value = emptyPlaceholder(task.Assignee)
-		rows[4].value = emptyPlaceholder(task.Reporter)
-		rows[5].value = m.priorityCell(task.Priority)
-		rows[6].value = emptyPlaceholder(formatDateTime(task.Due))
+		rows[1].value = m.statusCell(task)
+		rows[2].value = emptyPlaceholder(strings.Join(task.Topics, ", "))
+		rows[3].value = emptyPlaceholder(task.Tags)
+		rows[4].value = emptyPlaceholder(task.Assignee)
+		rows[5].value = emptyPlaceholder(task.Reporter)
+		rows[6].value = m.priorityCell(task.Priority)
+		rows[7].value = emptyPlaceholder(formatDateTime(task.Due))
 		if task.Due.Valid {
 			if name, ok := m.holidayName(normalizeDate(task.Due.Time)); ok && name != "" {
-				rows[6].value += "  " + m.styles.Danger.Render("· "+name)
+				rows[7].value += "  " + m.styles.Danger.Render("· "+name)
 			}
 		}
-		rows[7].value = defaultStart(task)
-		rows[8].value = emptyPlaceholder(formatDateTime(task.End))
-		rows[9].value = defaultTimezone(task.Timezone)
+		rows[8].value = defaultStart(task)
+		rows[9].value = emptyPlaceholder(formatDateTime(task.End))
+		rows[10].value = defaultTimezone(task.Timezone)
 		if recSummary := recurrenceSummary(task); recSummary != "" {
 			if next, ok := nextRecurrenceDate(task); ok {
-				rows[10].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
+				rows[11].value = fmt.Sprintf("%s • Next: %s", recSummary, next.Format("2006-01-02"))
 			} else {
-				rows[10].value = recSummary
+				rows[11].value = recSummary
 			}
 		} else {
-			rows[10].value = "off"
+			rows[11].value = "off"
 		}
 	} else {
 		for i := range rows {
@@ -2093,6 +2152,7 @@ func (m Model) noteMetaBlockLines() []string {
 			}
 		}
 		rows = []row{
+			{label: "Status", value: m.statusCell(task)},
 			{label: "Topics", value: emptyPlaceholder(strings.Join(task.Topics, ", "))},
 			{label: "Tags", value: emptyPlaceholder(task.Tags)},
 			{label: "Assignee", value: emptyPlaceholder(task.Assignee)},
@@ -2625,12 +2685,28 @@ func (m Model) startSearch() (tea.Model, tea.Cmd) {
 func (m Model) startFuzzySearch() (tea.Model, tea.Cmd) {
 	m.mode = modeSearch
 	m.searchFuzzy = true
+	m.searchCursor = 0
 	m.input.SetValue(m.searchQuery)
 	m.input.Placeholder = "Fuzzy search tasks"
 	m.input.Focus()
-	m.status = "Fuzzy search: type a query, Enter to apply, Esc to cancel"
+	m.status = "Fuzzy: type to filter, ↑/↓ to move, Enter to jump, Esc to cancel"
 	return m, nil
 }
+
+// fuzzyMatches returns the current fuzzy-find candidates for the typed query
+// (all of them, unwindowed), shared by the modal renderer and the key handler.
+func (m Model) fuzzyMatches() []listItem {
+	query := strings.TrimSpace(m.input.Value())
+	candidates := m.applyQuickFilterToItems(m.defaultVisibleItems())
+	matches := filterItemsByQuery(candidates, query, true)
+	if query == "" {
+		matches = candidates
+	}
+	return matches
+}
+
+// fuzzyVisibleRows is how many result rows the fuzzy modal shows at once.
+const fuzzyVisibleRows = 8
 
 func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
@@ -2643,10 +2719,10 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		m.input.SetValue(completeCommand(m.input.Value()))
 		m.input.CursorEnd()
 		return m, nil
-	case m.cfg.Keys.Up, "up":
+	case "up":
 		m.recallCommandHistory(-1)
 		return m, nil
-	case m.cfg.Keys.Down, "down":
+	case "down":
 		m.recallCommandHistory(1)
 		return m, nil
 	case m.cfg.Keys.Confirm, "enter":
@@ -2661,8 +2737,12 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			m.input.Blur()
 			return m, nil
 		}
-		if arg, ok := strings.CutPrefix(cmdLower, "board"); ok {
-			return m.enterBoardView(strings.TrimSpace(strings.TrimPrefix(arg, " ")))
+		// The stage board takes an optional project argument. ":board" is a
+		// legacy alias for ":kanban".
+		for _, pfx := range []string{"kanban", "board"} {
+			if arg, ok := strings.CutPrefix(cmdLower, pfx); ok {
+				return m.enterBoardView(strings.TrimSpace(strings.TrimPrefix(arg, " ")))
+			}
 		}
 		switch cmdLower {
 		case "q", "quit", "wq", "x":
@@ -2741,7 +2821,7 @@ func completeCommand(input string) string {
 		raw = strings.TrimPrefix(raw, ":")
 	}
 	cmd := strings.ToLower(raw)
-	commands := []string{"agenda", "all", "board", "calendar", "config", "dashboard", "done", "gantt", "help", "in-progress", "overdue", "pending", "projects", "quit", "stage", "stats", "today", "week"}
+	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "help", "in-progress", "kanban", "overdue", "pending", "projects", "quit", "stage", "stats", "today", "week"}
 	if cmd == "" {
 		return prefix + commands[0]
 	}
@@ -2800,7 +2880,35 @@ func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		m.input.Blur()
 		m.status = "Search cancelled"
 		return m, nil
+	case "up", "ctrl+p":
+		if m.searchFuzzy {
+			if m.searchCursor > 0 {
+				m.searchCursor--
+			}
+			return m, nil
+		}
+	case "down", "ctrl+n":
+		if m.searchFuzzy {
+			if n := len(m.fuzzyMatches()); n > 0 {
+				m.searchCursor = clampInt(m.searchCursor+1, 0, n-1)
+			}
+			return m, nil
+		}
 	case m.cfg.Keys.Confirm, "enter":
+		// In fuzzy mode, Enter jumps straight to the highlighted result.
+		if m.searchFuzzy {
+			matches := m.fuzzyMatches()
+			if m.searchCursor >= 0 && m.searchCursor < len(matches) && matches[m.searchCursor].kind == itemTask {
+				target := matches[m.searchCursor].task.ID
+				m.searchQuery = ""
+				m.searchFuzzy = false
+				m.mode = modeList
+				m.input.Blur()
+				m.cursor = clampCursor(m.findVisibleTaskIndex(target), len(m.visibleItems()))
+				m.status = fmt.Sprintf("Jumped to #%d", target)
+				return m, nil
+			}
+		}
 		m.searchQuery = strings.TrimSpace(m.input.Value())
 		m.mode = modeList
 		m.input.Blur()
@@ -2816,11 +2924,13 @@ func (m Model) updateSearchMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		}
 		m.cursor = clampCursor(0, len(m.visibleItems()))
 		return m, nil
-	default:
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
 	}
+	// Typing (any other key) edits the query; a changed result set resets the
+	// highlight to the top.
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.searchCursor = 0
+	return m, cmd
 }
 
 func (m Model) applyConfigChanges() (tea.Model, tea.Cmd) {

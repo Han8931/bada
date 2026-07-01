@@ -633,18 +633,18 @@ func TestFuzzySearchKeys(t *testing.T) {
 	m.input.SetValue("fb")
 	res, _ = m.updateSearchMode("enter", tea.KeyMsg{Type: tea.KeyEnter})
 	m = res.(Model)
-	items := m.visibleItems()
-	if len(items) != 1 || items[0].task.ID != 1 {
-		t.Fatalf("expected fuzzy query to match Fix bug, got %+v", items)
+	// Fuzzy Enter jumps to the highlighted match and exits search.
+	if m.mode != modeList || m.searchFuzzy {
+		t.Fatalf("expected fuzzy Enter to jump and exit search (mode=%d fuzzy=%v)", m.mode, m.searchFuzzy)
 	}
-	if !strings.Contains(m.taskPanelTitle(), "fuzzy") {
-		t.Fatalf("expected fuzzy search scope in task panel title")
+	if cur, ok := m.currentTask(); !ok || cur.ID != 1 {
+		t.Fatalf("expected cursor on Fix bug (#1) after fuzzy jump, got %+v ok=%v", cur, ok)
 	}
 
 	m.resetToOriginalListView()
 	m.searchFuzzy = true
 	m.searchQuery = "hn p3"
-	items = m.visibleItems()
+	items := m.visibleItems()
 	if len(items) != 1 || items[0].task.ID != 1 {
 		t.Fatalf("expected fuzzy query to match assignee/priority fields, got %+v", items)
 	}

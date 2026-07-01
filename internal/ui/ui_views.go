@@ -501,6 +501,16 @@ func (m Model) updateNoteMode(key string) (tea.Model, tea.Cmd) {
 		m.status = "Notes closed"
 		return m, nil
 	case m.cfg.Keys.Edit:
+		// e edits the task's fields (the metadata box); topic notes have no
+		// fields, so e falls back to editing the note text.
+		if m.note != nil && m.note.target.kind == noteTask {
+			if idx := m.findTaskIndex(m.note.target.taskID); idx >= 0 {
+				return m.startMetadataEdit(m.tasks[idx])
+			}
+		}
+		return m.startNoteEditFromState()
+	case "n", m.cfg.Keys.Detail:
+		// n / v open the note text editor.
 		return m.startNoteEditFromState()
 	case "d":
 		if m.note == nil {
@@ -1013,18 +1023,18 @@ func (m Model) helpContent() string {
   :calendar  Open calendar view
   :gantt     Open gantt timeline
   :stats     Open productivity stats
-  :dashboard Open project (topic) dashboard
-  :board [t] Kanban board for a project's workflow
+  :projects  Projects overview (progress, workflows, metadata)
+  :kanban[t] Stage board for a project's workflow
   :stage <n> Filter list to a workflow stage
   :config    Update config and db paths
   :help / ?  Open this help screen
   :q / :quit Quit bada
 
-Projects (:dashboard):
+Projects (:projects):
   enter  Scope to project   w  Edit status workflow
   e desc · t target · a archive   The 1st topic on a task is its project.
   Workflow editor: a add · e rename · c category · J/K reorder · D delete
-  Board (:board): h/l column · j/k task · enter detail · L/H advance/send back · esc close
+  Kanban (:kanban): h/l column · j/k task · enter detail · L/H advance/send back · esc close
 
 List Navigation:
   %s/%s  Move cursor

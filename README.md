@@ -37,7 +37,10 @@ stays flat and scan-friendly.
 
 Open with `:` commands (tab to autocomplete), or the shortcuts noted:
 
-- `:agenda` — reminder report (also opens on launch); shows overdue, today, and a configurable upcoming window grouped by date.
+- `:agenda` — the daily agenda (also opens on launch). Leads with a day's I Ching
+  reading, an at-a-glance triage summary, a completion streak, and a 7-day
+  sparkline, then sections for Overdue, Due Today (as a schedule), Upcoming,
+  Recurring, No date, and Recently Added/Done. Press `z` to fold the header.
 - `:calendar` — month grid; `h/l` day, `j/k` week, `H/L` month, `Enter` day detail.
 - `:gantt` — timeline of tasks with start/due bars and a "today" marker.
 - `:stats` — productivity dashboard: counts, completions (today/week/month),
@@ -75,7 +78,10 @@ Quick filter commands:
   and `:all` to clear.
 - Search: `/` opens a query prompt; `F` or `,f` opens fuzzy search;
   `Enter` applies, `Esc` cancels (submit empty to clear).
-- Notes: `Enter` to preview notes, `e` to edit notes inside the preview.
+- Detail & notes: `Enter` opens a task's detail view — status (with an overdue
+  tag), topics, priority, due, recurrence, and its notes. Inside it, `e` edits the
+  task's fields (the metadata box) and `n` (or `v`) opens the note text editor.
+  Works from the task list, the agenda, and the kanban.
 - Agenda: opens on launch; type `:agenda` to view again. It leads with an
   at-a-glance summary (overdue / due today / upcoming / done today), a completion
   streak, and a 7-day due-count sparkline, then sections for Overdue, Due Today
@@ -91,8 +97,8 @@ Quick filter commands:
 
 ## Projects & custom workflows
 
-Topics double as **projects**. Open the project dashboard with `:dashboard`
-(aliases `:projects`, `:topics`) to manage them:
+Topics double as **projects**. Open the **projects overview** with `:projects`
+(aliases `:topics`, and `:dashboard` for muscle memory) to manage them:
 
 - **Scope** to a project with `Enter` (filters the task list to that topic).
 - **Custom status workflow** with `w`: define an ordered pipeline of stages, e.g.
@@ -103,11 +109,12 @@ Topics double as **projects**. Open the project dashboard with `:dashboard`
   its color. Mark the terminal stage `done`; rotating a task into it completes
   the task (sets its completion time), just like the built-in `DONE`.
 - **Project metadata**: `e` edits the description, `t` sets a target date, `a`
-  toggles archived. The dashboard shows each project's completion bar, overdue
-  count, and stage funnel.
-- **Kanban board**: `:board` (or `:board <topic>`) opens a column-per-stage board
-  for the scoped project. `h`/`l` move between columns, `j`/`k` between tasks,
-  and `L`/`H` advance a task to the next stage or send it back.
+  toggles archived. The projects overview shows each project's completion bar,
+  overdue count, and stage funnel.
+- **Kanban board**: `:kanban` (or `:kanban <topic>`; `:board` is a legacy alias)
+  opens a column-per-stage board for the scoped project. `h`/`l` move between
+  columns, `j`/`k` between tasks, and `L`/`H` advance a task to the next stage or
+  send it back.
 - **Stage filter & sort**: `:stage <name>` filters the list to a single workflow
   stage; sort by pipeline position with `s` then `w`.
 
