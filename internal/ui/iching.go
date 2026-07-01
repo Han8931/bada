@@ -162,7 +162,7 @@ func ichingDailyLesson(f ichingFortune) string {
 func (m Model) enterFortuneView() (tea.Model, tea.Cmd) {
 	m.mode = modeFortune
 	m.fortuneScroll = 0
-	m.status = "Daily lesson"
+	m.status = "Today’s reading"
 	return m, nil
 }
 
@@ -173,7 +173,7 @@ func (m Model) updateFortuneMode(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", m.cfg.Keys.Quit, "q":
 		m.mode = modeList
-		m.status = "Lesson closed"
+		m.status = "Reading closed"
 		return m, nil
 	case ":":
 		return m.startCommand()
@@ -228,7 +228,7 @@ func (m Model) renderFortuneView() string {
 		}
 		lines = lines[scroll:end]
 	}
-	return m.panel("bada ∙ Life Lesson", strings.Join(lines, "\n")) + "\n" + footer
+	return m.panel("bada ∙ I Ching Reading", strings.Join(lines, "\n")) + "\n" + footer
 }
 
 func (m Model) fortuneFooter() string {
@@ -242,15 +242,32 @@ func (m Model) fortuneLines() []string {
 	if wrapW < 24 {
 		wrapW = inner
 	}
-	date := time.Now().Format("Mon, Jan 2")
-	lesson := ichingDailyLesson(f)
+	// The hexagram symbol + name anchors the reading; the rest is just the lesson
+	// and its follow-on sentences, with no "Theme/Advice/Caution" labels.
 	lines := []string{
-		"  " + m.styles.Heading.Render("Daily Lesson"),
-		"  " + m.styles.Muted.Render(date),
+		"  " + m.styles.Accent.Bold(true).Render(f.Symbol+"   "+shortHexagramName(f.Name)),
 		"",
 	}
-	lines = append(lines, indentWrapped(lesson, wrapW, "  ")...)
+	para := func(body string) {
+		if strings.TrimSpace(body) == "" {
+			return
+		}
+		lines = append(lines, indentWrapped(body, wrapW, "  ")...)
+		lines = append(lines, "")
+	}
+	para(ichingDailyLesson(f))
+	para(f.Advice)
+	para(f.Caution)
 	return lines
+}
+
+// shortHexagramName returns the readable English name of a hexagram, e.g.
+// "Bi / Grace" → "Grace", "Qian / The Creative" → "The Creative".
+func shortHexagramName(name string) string {
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return strings.TrimSpace(name[i+1:])
+	}
+	return strings.TrimSpace(name)
 }
 
 func dailyIChingFortune(t time.Time) ichingFortune {

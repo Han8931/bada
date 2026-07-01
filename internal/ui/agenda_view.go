@@ -21,13 +21,22 @@ func (m *Model) refreshReport() {
 		upcomingDays = 3
 	}
 	soon := today.AddDate(0, 0, upcomingDays)
+	scope := m.scopedTopicName()
 
-	var overdue, todayList, upcoming, recurring []storage.Task
-	for _, t := range m.tasks {
+	var overdue, todayList, upcoming, recurring, noDate []storage.Task
+	for _, t := range m.agendaTasks() {
 		if isRecurringTask(t) && isActive(t) {
 			recurring = append(recurring, t)
 		}
-		if isDone(t) || !t.Due.Valid {
+		if isDone(t) {
+			continue
+		}
+		if !t.Due.Valid {
+			// Undated but prioritized tasks would otherwise be invisible on the
+			// agenda; surface them as a gentle nudge (recurring shown separately).
+			if t.Priority > 0 && !isRecurringTask(t) {
+				noDate = append(noDate, t)
+			}
 			continue
 		}
 		d := t.Due.Time.In(loc)
@@ -58,19 +67,24 @@ func (m *Model) refreshReport() {
 		})
 	}
 	sortAgendaTasks(overdue)
-	sortAgendaTasks(todayList)
 	sortAgendaTasks(upcoming)
 	sortAgendaTasks(recurring)
-	recentAdd := m.recentlyAdded(m.recentLimit)
-	recentDone := m.recentlyDone(m.recentLimit)
-	totalReportTasks := len(overdue) + len(todayList) + len(upcoming) + len(recurring) + len(recentAdd) + len(recentDone)
+	sortAgendaTasks(noDate)
+	// Due Today reads as a schedule: earliest first.
+	sort.SliceStable(todayList, func(i, j int) bool {
+		return todayList[i].Due.Time.Before(todayList[j].Due.Time)
+	})
+	recentAdd := recentlyAddedFrom(m.agendaTasks(), m.recentLimit)
+	recentDone := recentlyDoneFrom(m.agendaTasks(), m.recentLimit)
+	totalReportTasks := len(overdue) + len(todayList) + len(upcoming) + len(recurring) + len(noDate) + len(recentAdd) + len(recentDone)
 	m.reportCursor = clampCursor(m.reportCursor, totalReportTasks)
 	m.reportTaskIDs = nil
 
 	// Title column scales with the terminal; the rest of the line (gutter, id,
-	// priority, and trailing date) is ~44 cells. "∙" is one cell even in
-	// CJK/Termius, unlike "•".
-	titleW := clampInt(m.width-48, 16, 52)
+	// priority flag, project/stage meta, and trailing date) is ~64 cells. "∙" is
+	// one cell even in CJK/Termius, unlike "•".
+	metaW := 16
+	titleW := clampInt(m.width-64, 14, 44)
 	var b strings.Builder
 	writeDivider := func() {
 		b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
@@ -113,22 +127,37 @@ func (m *Model) refreshReport() {
 			return fmt.Sprintf("%dd overdue", -days)
 		}
 	}
+	// rowMeta is the muted secondary column: the task's project (hidden when the
+	// agenda is already scoped to one) and its workflow stage, when governed.
+	rowMeta := func(t storage.Task) string {
+		var parts []string
+		if scope == "" {
+			if pt := primaryOrFirstTopic(t); pt != "" {
+				parts = append(parts, pt)
+			}
+		}
+		if stages, ok := m.governingWorkflow(t); ok {
+			parts = append(parts, stages[currentStageIndex(stages, t.Status)].Name)
+		}
+		return strings.Join(parts, " · ")
+	}
 	// Rows carry a section-colored left gutter, a narrow task bullet, a muted id,
-	// the priority flag, a plain (default-foreground) title for readability, and a
-	// section-colored trailing date/urgency. The selected row fills with the
-	// selection color. The "#NNN" token must stay intact for cursor-visibility
-	// lookups.
+	// the priority flag, a plain (default-foreground) title for readability, a
+	// muted project/stage column, and a section-colored trailing date/urgency. The
+	// selected row fills with the selection color. The "#NNN" token must stay
+	// intact for cursor-visibility lookups.
 	writeTasks := func(tasks []storage.Task, style lipgloss.Style, trailing func(storage.Task) string) {
 		for _, t := range tasks {
 			idx := len(m.reportTaskIDs)
 			m.reportTaskIDs = append(m.reportTaskIDs, t.ID)
 			title := truncateTextWidth(t.Title, titleW)
+			meta := truncateTextWidth(rowMeta(t), metaW)
 			flagCh := "⚐"
 			if t.Priority > 0 {
 				flagCh = "⚑"
 			}
 			if idx == m.reportCursor {
-				line := fmt.Sprintf(" ▌ ∙ #%-3d %s %-*s  %s", t.ID, flagCh, titleW, title, trailing(t))
+				line := fmt.Sprintf(" ▌ ∙ #%-3d %s %-*s  %-*s  %s", t.ID, flagCh, titleW, title, metaW, meta, trailing(t))
 				b.WriteString(m.styles.Selection.Render(line))
 				b.WriteString("\n")
 				continue
@@ -139,11 +168,26 @@ func (m *Model) refreshReport() {
 			b.WriteString(" ")
 			b.WriteString(fmt.Sprintf("%-*s", titleW, title))
 			b.WriteString("  ")
+			b.WriteString(m.styles.Muted.Render(fmt.Sprintf("%-*s", metaW, meta)))
+			b.WriteString("  ")
 			b.WriteString(style.Render(trailing(t)))
 			b.WriteString("\n")
 		}
 	}
-	dueTrail := func(t storage.Task) string { return localRelativeDue(t) + " · " + formatDateTime(t.Due) }
+	dueTrail := func(t storage.Task) string { return localRelativeDue(t) + " · " + t.Due.Time.In(loc).Format("Jan 2") }
+	todayTrail := func(t storage.Task) string {
+		tm := t.Due.Time.In(loc)
+		if tm.Hour() == 0 && tm.Minute() == 0 {
+			return "all day"
+		}
+		return tm.Format("15:04")
+	}
+
+	// Friendly all-clear when nothing needs attention now.
+	if len(overdue)+len(todayList)+len(upcoming) == 0 {
+		b.WriteString("  " + m.styles.Success.Render("✓ All clear — nothing due right now"))
+		b.WriteString("\n\n")
+	}
 
 	if len(overdue) > 0 {
 		writeSectionHeader("⚠", "Overdue", len(overdue), m.styles.Danger)
@@ -152,7 +196,7 @@ func (m *Model) refreshReport() {
 	}
 	if len(todayList) > 0 {
 		writeSectionHeader("◆", "Due Today", len(todayList), m.styles.Accent)
-		writeTasks(todayList, m.styles.Accent, dueTrail)
+		writeTasks(todayList, m.styles.Accent, todayTrail)
 		b.WriteString("\n")
 	}
 	if len(upcoming) > 0 {
@@ -189,6 +233,11 @@ func (m *Model) refreshReport() {
 		})
 		b.WriteString("\n")
 	}
+	if len(noDate) > 0 {
+		writeSectionHeader("◷", "No date", len(noDate), m.styles.Muted)
+		writeTasks(noDate, m.styles.Muted, func(t storage.Task) string { return "no due date" })
+		b.WriteString("\n")
+	}
 
 	writeDivider()
 	writeSectionHeader("＋", "Recently Added", len(recentAdd), m.styles.Heading)
@@ -214,37 +263,235 @@ func (m *Model) refreshReport() {
 	m.reportScroll = clampInt(m.reportScroll, 0, m.reportMaxScroll())
 }
 
+// agendaTasks returns the tasks the agenda should consider — all of them, or
+// just those in the scoped project when the list is scoped to a topic.
+func (m Model) agendaTasks() []storage.Task {
+	scope := m.scopedTopicName()
+	if scope == "" {
+		return m.tasks
+	}
+	out := make([]storage.Task, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		if taskHasTopic(t, scope) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// primaryOrFirstTopic is the task's project: its primary topic, else its first
+// label topic.
+func primaryOrFirstTopic(t storage.Task) string {
+	if p := strings.TrimSpace(t.PrimaryTopic); p != "" {
+		return p
+	}
+	if len(t.Topics) > 0 {
+		return t.Topics[0]
+	}
+	return ""
+}
+
+func recentlyAddedFrom(tasks []storage.Task, limit int) []storage.Task {
+	cp := append([]storage.Task{}, tasks...)
+	sort.SliceStable(cp, func(i, j int) bool { return cp[i].CreatedAt.After(cp[j].CreatedAt) })
+	if len(cp) > limit {
+		cp = cp[:limit]
+	}
+	return cp
+}
+
+func recentlyDoneFrom(tasks []storage.Task, limit int) []storage.Task {
+	var done []storage.Task
+	for _, t := range tasks {
+		if isDone(t) {
+			done = append(done, t)
+		}
+	}
+	sort.SliceStable(done, func(i, j int) bool {
+		ai, aj := done[i].CompletedAt, done[j].CompletedAt
+		if ai.Valid && aj.Valid {
+			return ai.Time.After(aj.Time)
+		}
+		return ai.Valid
+	})
+	if len(done) > limit {
+		done = done[:limit]
+	}
+	return done
+}
+
 func (m Model) renderReportHeader() string {
 	now := time.Now()
 	var b strings.Builder
-	b.WriteString(m.renderListBanner())
+	if !m.agendaHeaderFold {
+		b.WriteString(m.renderListBanner())
+		b.WriteString("\n\n")
+	}
+
+	// Greeting line, with the scoped project and a completion streak appended.
+	greeting := fmt.Sprintf("  %s, it's %s", greetingForTime(now), now.Format("Monday, Jan 2"))
+	line := m.styles.Heading.Render(greeting)
+	if scope := m.scopedTopicName(); scope != "" {
+		line += m.styles.Muted.Render("   ·   ") + m.styles.Accent.Render("Agenda · "+scope)
+	}
+	if streak := m.completionStreak(); streak > 1 {
+		line += m.styles.Muted.Render("   ·   ") + m.styles.Warning.Render(fmt.Sprintf("🔥 %d-day streak", streak))
+	}
+	b.WriteString(line)
+	b.WriteString("\n")
+
+	// The lesson sits just under the greeting, with a blank line separating it
+	// from the triage summary below.
+	if !m.agendaHeaderFold {
+		b.WriteString(m.renderAgendaFortune(now))
+		b.WriteString("\n\n")
+	}
+
+	// At-a-glance triage summary + 7-day sparkline.
+	b.WriteString(m.renderAgendaSummary())
+	b.WriteString("\n")
+	b.WriteString(m.renderAgendaWeek(now))
 	b.WriteString("\n\n")
-	b.WriteString(m.styles.Heading.Render(fmt.Sprintf("  %s, it's %s", greetingForTime(now), now.Format("Monday, Jan 2"))))
-	b.WriteString("\n\n")
-	b.WriteString(m.renderAgendaFortune(now))
-	b.WriteString("\n\n\n")
 	return b.String()
 }
 
+// renderAgendaSummary is the color-coded at-a-glance line under the greeting.
+func (m Model) renderAgendaSummary() string {
+	o, today, up, doneToday := m.agendaCounts()
+	var parts []string
+	if o > 0 {
+		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("⚠ %d overdue", o)))
+	}
+	if today > 0 {
+		parts = append(parts, m.styles.Accent.Render(fmt.Sprintf("◆ %d due today", today)))
+	}
+	if up > 0 {
+		parts = append(parts, m.styles.Warning.Render(fmt.Sprintf("▸ %d upcoming", up)))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, m.styles.Success.Render("✓ all clear"))
+	}
+	if doneToday > 0 {
+		parts = append(parts, m.styles.Success.Render(fmt.Sprintf("✓ %d done today", doneToday)))
+	}
+	return "  " + strings.Join(parts, m.styles.Muted.Render("   ∙   "))
+}
+
+// agendaCounts tallies the scoped tasks for the summary strip.
+func (m Model) agendaCounts() (overdue, today, upcoming, doneToday int) {
+	now := time.Now()
+	loc := now.Location()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	tomorrow := start.Add(24 * time.Hour)
+	upcomingDays := m.cfg.Agenda.UpcomingDays
+	if upcomingDays <= 0 {
+		upcomingDays = 3
+	}
+	soon := start.AddDate(0, 0, upcomingDays)
+	for _, t := range m.agendaTasks() {
+		if t.CompletedAt.Valid {
+			c := t.CompletedAt.Time.In(loc)
+			if !c.Before(start) && c.Before(tomorrow) {
+				doneToday++
+			}
+		}
+		if isDone(t) || !t.Due.Valid {
+			continue
+		}
+		d := t.Due.Time.In(loc)
+		switch {
+		case d.Before(start):
+			overdue++
+		case d.Before(tomorrow):
+			today++
+		case d.Before(soon):
+			upcoming++
+		}
+	}
+	return
+}
+
+// renderAgendaWeek draws a 7-day due-count sparkline starting today.
+func (m Model) renderAgendaWeek(now time.Time) string {
+	loc := now.Location()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	var counts [7]int
+	for _, t := range m.agendaTasks() {
+		if isDone(t) || !t.Due.Valid {
+			continue
+		}
+		d := normalizeDate(t.Due.Time.In(loc))
+		off := int(d.Sub(start).Hours() / 24)
+		if off >= 0 && off < 7 {
+			counts[off]++
+		}
+	}
+	max := 0
+	for _, c := range counts {
+		if c > max {
+			max = c
+		}
+	}
+	bars := []rune("▁▂▃▄▅▆▇█")
+	var b strings.Builder
+	b.WriteString(m.styles.Muted.Render("  Next 7 days "))
+	for i := 0; i < 7; i++ {
+		day := start.AddDate(0, 0, i)
+		label := day.Format("Mon")[:1]
+		glyph := "·"
+		if counts[i] > 0 {
+			lvl := 0
+			if max > 0 {
+				lvl = (counts[i] - 1) * (len(bars) - 1) / max
+			}
+			glyph = string(bars[lvl])
+		}
+		style := m.styles.Muted
+		if i == 0 {
+			style = m.styles.Accent // today
+		}
+		b.WriteString(" " + style.Render(label) + m.styles.Heading.Render(glyph))
+	}
+	return b.String()
+}
+
+// completionStreak counts consecutive days (ending today, or yesterday if
+// nothing's done yet today) with at least one completed task.
+func (m Model) completionStreak() int {
+	loc := time.Now().Location()
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	set := map[string]bool{}
+	for _, t := range m.tasks {
+		if t.CompletedAt.Valid {
+			c := t.CompletedAt.Time.In(loc)
+			set[time.Date(c.Year(), c.Month(), c.Day(), 0, 0, 0, 0, loc).Format("2006-01-02")] = true
+		}
+	}
+	streak := 0
+	cur := today
+	if !set[cur.Format("2006-01-02")] {
+		cur = today.AddDate(0, 0, -1)
+	}
+	for set[cur.Format("2006-01-02")] {
+		streak++
+		cur = cur.AddDate(0, 0, -1)
+	}
+	return streak
+}
+
+// renderAgendaFortune shows just the day's lesson — no label, no header — as a
+// clear (normal-foreground) italic line with a subtle accent gutter.
 func (m Model) renderAgendaFortune(now time.Time) string {
-	f := dailyIChingFortune(now)
 	inner := m.panelInnerWidth()
-	wrapW := inner - 4
+	wrapW := inner - 6
 	if wrapW < 24 {
 		wrapW = inner
 	}
-
-	label := m.styles.Accent.Bold(true).Render("  Daily Lesson")
-	ruleW := inner - lipgloss.Width(label) - 1
-	if ruleW < 1 {
-		ruleW = 1
-	}
-	lesson := ichingDailyLesson(f)
-
-	lines := []string{label + m.styles.Border.Render(" "+strings.Repeat("─", ruleW))}
-	lessonStyle := m.styles.Muted.Italic(true)
-	for _, line := range strings.Split(wrapText(lesson, wrapW), "\n") {
-		lines = append(lines, m.styles.Accent.Render("  ▌ ")+lessonStyle.Render(line))
+	style := lipgloss.NewStyle().Italic(true)
+	var lines []string
+	for _, line := range strings.Split(wrapText(ichingDailyLesson(dailyIChingFortune(now)), wrapW), "\n") {
+		lines = append(lines, m.styles.Accent.Render("  ▌ ")+style.Render(line))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -257,6 +504,7 @@ func (m Model) renderReportFooter() string {
 		{m.cfg.Keys.Edit, "edit"},
 		{m.cfg.Keys.DueBack + "/" + m.cfg.Keys.DueForward, "shift due"},
 		{"g", "jump"},
+		{"z", "fold"},
 		{m.cfg.Keys.Cancel + "/" + m.cfg.Keys.Quit, "back"},
 	})
 }

@@ -264,6 +264,7 @@ type Model struct {
 	boardCol          int
 	boardRow          int
 	undo              *undoEntry
+	agendaHeaderFold  bool // hide the banner + I Ching reading to give the agenda body more room
 }
 
 // undoEntry holds a single reversible snapshot for the u key.

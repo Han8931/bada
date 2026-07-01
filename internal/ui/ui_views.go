@@ -174,6 +174,16 @@ func (m Model) updateReportMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		m.reportScroll = m.reportMaxScroll()
 		m.status = "Bottom"
 		return m, nil
+	case "z":
+		m.agendaHeaderFold = !m.agendaHeaderFold
+		m.reportScroll = 0
+		if m.agendaHeaderFold {
+			m.status = "Header folded"
+		} else {
+			m.status = "Header expanded"
+		}
+		m.ensureReportCursorVisible()
+		return m, nil
 	}
 	if m.processScrollKey(key, m.reportMaxScroll(), &m.reportScroll) {
 		return m, nil
@@ -999,7 +1009,7 @@ func (m Model) renderHelpView() string {
 
 func (m Model) helpContent() string {
 	return strings.TrimRight(fmt.Sprintf(`Commands:
-  :agenda    Open reminder report
+  :agenda    Open agenda (z folds header; scope a topic first to filter it)
   :calendar  Open calendar view
   :gantt     Open gantt timeline
   :stats     Open productivity stats

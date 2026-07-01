@@ -76,7 +76,14 @@ Quick filter commands:
 - Search: `/` opens a query prompt; `F` or `,f` opens fuzzy search;
   `Enter` applies, `Esc` cancels (submit empty to clear).
 - Notes: `Enter` to preview notes, `e` to edit notes inside the preview.
-- Reminder report: opens on launch; type `:agenda` to view again (shows overdue/today/upcoming pending tasks with flag priority marks and relative due labels). Use `j/k` to select, `Enter` notes, `r` status, `e` edit, `[`/`]` reschedule, `g` jump to the task list.
+- Agenda: opens on launch; type `:agenda` to view again. It leads with an
+  at-a-glance summary (overdue / due today / upcoming / done today), a completion
+  streak, and a 7-day due-count sparkline, then sections for Overdue, Due Today
+  (as a time-ordered schedule), Upcoming, Recurring, No date (prioritized undated
+  tasks), and Recently Added/Done. Each row shows its project and workflow stage.
+  Use `j/k` to select, `Enter` notes, `r` status, `e` edit, `[`/`]` reschedule,
+  `g` jump to the task list, and `z` to fold the header for more room. Scope the
+  list to a topic first and the agenda filters to that project (`Agenda · <topic>`).
 - Help: `?` (or `:help`) opens the full keybinding reference.
 - Other views: `:calendar` (month grid) and `:gantt` (timeline).
 - From a filtered/searched/topic-scoped list, `Esc` or `q` returns to the
