@@ -47,7 +47,10 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
   current & longest streaks, a 7-day completion chart, and pending breakdowns by
   priority and topic.
 - `:help` (or `?`) — full keybinding reference.
-- `:config` — update config and DB paths.
+- `:config` — open the config file in `$EDITOR`; bada reloads it (theme,
+  keybindings, etc.) when you save and quit the editor.
+- `:theme` — list available palettes; `:theme <name>` switches to one
+  (`light`, `dark`, `purple`).
 
 Quick filter commands:
 
@@ -144,7 +147,19 @@ Notes:
 
 ## Theme
 
-Edit the `[theme]` section in `config.toml` (see `config.example.toml`) to customize colors for headings, accents, status bar, and selection highlight.
+bada ships several built-in palettes: **light** (default), **dark**, **purple**,
+**ocean**, **forest**, **rose**, and **graphite**. There are four ways to switch:
+
+- **`:theme` command:** run `:theme` to list the available palettes, or
+  `:theme <name>` (e.g. `:theme purple`) to switch. The change applies
+  immediately and is saved to your `config.toml`.
+- **Cycle live:** press `t` in the list view to rotate through the presets,
+  applied and saved immediately.
+- **Pick a preset:** set `preset = "ocean"`, `"forest"`, `"rose"`, `"graphite"`,
+  `"purple"`, `"dark"`, or `"light"` in the `[theme]` section of `config.toml`.
+- **Hand-tune colors:** edit any key in `[theme]` to customize headings, accents,
+  status bar, selection highlight, etc. Individual keys override the chosen preset,
+  so you can start from `preset = "purple"` and adjust a single hue.
 
 The UI is framed in rounded panels with a colored table-header bar, a status-dot
 legend, and a key-hint footer. Two notable theme keys drive the framing:
@@ -152,8 +167,8 @@ legend, and a key-hint footer. Two notable theme keys drive the framing:
 - `border` — color of the rounded panel frames.
 - `status_alt_bg` / `status_alt_fg` — the table-header bar and the key-hint chips.
 
-`config.example.toml` ships a light default plus a commented **dark slate**
-(taskdog-style) palette — copy that block over the `[theme]` section to switch.
+See `config.example.toml` for the full `[theme]` section and explicit palette
+values.
 
 ## Trash
 

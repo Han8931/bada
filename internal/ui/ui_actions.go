@@ -213,15 +213,9 @@ func buildStyles(theme config.Theme) uiStyles {
 	styles.StatusAlt = applyBg(styles.StatusAlt, theme.StatusAltBg)
 	styles.StatusAlt = applyFg(styles.StatusAlt, theme.StatusAltFg)
 
-	// Filled, color-coded status badges. Text uses the light status-alt
-	// foreground (white fallback) for contrast against the colored fills.
-	badgeFg := theme.StatusAltFg
-	if strings.TrimSpace(badgeFg) == "" {
-		badgeFg = "#FFFFFF"
-	}
-	styles.StatusOverdue = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Danger), badgeFg)
-	styles.StatusProgress = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Warning), badgeFg)
-	styles.StatusDone = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Success), badgeFg)
+	styles.StatusOverdue = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Danger), readableTextColor(theme.Danger, theme.StatusAltFg))
+	styles.StatusProgress = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Warning), readableTextColor(theme.Warning, theme.StatusAltFg))
+	styles.StatusDone = applyFg(applyBg(lipgloss.NewStyle().Bold(true), theme.Success), readableTextColor(theme.Success, theme.StatusAltFg))
 	styles.StatusPending = applyFg(lipgloss.NewStyle(), theme.Muted)
 
 	styles.RowStripe = applyBg(lipgloss.NewStyle(), theme.RowStripeBg)
@@ -255,6 +249,29 @@ func applyBg(style lipgloss.Style, color string) lipgloss.Style {
 		return style
 	}
 	return style.Background(lipgloss.Color(color))
+}
+
+func readableTextColor(bg, fallback string) string {
+	bg = strings.TrimPrefix(strings.TrimSpace(bg), "#")
+	if len(bg) != 6 {
+		if strings.TrimSpace(fallback) != "" {
+			return fallback
+		}
+		return "#FFFFFF"
+	}
+	r, rErr := strconv.ParseInt(bg[0:2], 16, 64)
+	g, gErr := strconv.ParseInt(bg[2:4], 16, 64)
+	b, bErr := strconv.ParseInt(bg[4:6], 16, 64)
+	if rErr != nil || gErr != nil || bErr != nil {
+		if strings.TrimSpace(fallback) != "" {
+			return fallback
+		}
+		return "#FFFFFF"
+	}
+	if (299*r + 587*g + 114*b) > 140000 {
+		return "#0D1117"
+	}
+	return "#FFFFFF"
 }
 
 func (m Model) handleNoteEdited(msg noteEditedMsg) (tea.Model, tea.Cmd) {
@@ -2659,6 +2676,82 @@ func (m Model) startCommand() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// openConfigFile launches $EDITOR (or $VISUAL, else vi) on the active config
+// file. When the editor exits, configEditedMsg triggers a live reload so theme
+// and keybinding changes take effect without a restart.
+func (m Model) openConfigFile() (tea.Model, tea.Cmd) {
+	// Leave command mode before suspending for the editor, so returning from it
+	// lands back in the normal list view rather than the ":" prompt.
+	m.mode = modeList
+	m.input.Blur()
+	path := strings.TrimSpace(m.configPath)
+	if path == "" {
+		m.status = "No config file path is set"
+		return m, nil
+	}
+	// LoadOrCreate on startup writes the file, but guard in case it was removed.
+	if _, err := config.LoadOrCreate(path); err != nil {
+		m.status = fmt.Sprintf("config open failed: %v", err)
+		return m, nil
+	}
+	editor := resolveEditor()
+	if len(editor) == 0 {
+		m.status = "No editor set ($EDITOR/$VISUAL)"
+		return m, nil
+	}
+	cmd := exec.Command(editor[0], append(editor[1:], path)...)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return configEditedMsg{err: err}
+	})
+}
+
+// handleConfigEdited reloads the config after the editor closes and re-applies
+// the theme (keybindings are read from m.cfg on each keystroke, so they update
+// too). db_path/trash_dir changes need a restart since the store is already open.
+func (m Model) handleConfigEdited(msg configEditedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.status = fmt.Sprintf("config edit failed: %v", msg.err)
+		return m, nil
+	}
+	cfg, err := config.LoadOrCreate(m.configPath)
+	if err != nil {
+		m.status = fmt.Sprintf("config reload failed: %v", err)
+		return m, nil
+	}
+	m.cfg = cfg
+	m.styles = buildStyles(cfg.Theme)
+	m.status = "Config reloaded"
+	return m, nil
+}
+
+// applyThemeCommand backs the :theme command (and the theme-toggle key). With an
+// empty name it reports the available palettes and the current one; with a name
+// it switches to that preset, restyles immediately, and saves the choice.
+func (m Model) applyThemeCommand(name string) (tea.Model, tea.Cmd) {
+	names := config.ThemePresetNames()
+	if name == "" {
+		current := strings.TrimSpace(m.cfg.Theme.Preset)
+		if current == "" {
+			current = "custom"
+		}
+		m.status = fmt.Sprintf("Themes: %s (current: %s) — :theme <name>", strings.Join(names, ", "), current)
+		return m, nil
+	}
+	theme, ok := config.PresetTheme(name)
+	if !ok {
+		m.status = fmt.Sprintf("Unknown theme %q. Available: %s", name, strings.Join(names, ", "))
+		return m, nil
+	}
+	m.cfg.Theme = theme
+	m.styles = buildStyles(theme)
+	if err := config.Save(m.configPath, m.cfg); err != nil {
+		m.status = fmt.Sprintf("Theme: %s (not saved: %v)", theme.Preset, err)
+		return m, nil
+	}
+	m.status = "Theme: " + theme.Preset
+	return m, nil
+}
+
 func (m Model) startConfig() (Model, tea.Cmd) {
 	m.mode = modeConfig
 	m.configStage = configStagePath
@@ -2737,6 +2830,12 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			m.input.Blur()
 			return m, nil
 		}
+		// ":theme" lists available palettes; ":theme <name>" switches to one.
+		if cmdLower == "theme" || strings.HasPrefix(cmdLower, "theme ") {
+			m.mode = modeList
+			m.input.Blur()
+			return m.applyThemeCommand(strings.TrimSpace(strings.TrimPrefix(cmdLower, "theme")))
+		}
 		// The stage board takes an optional project argument. ":board" is a
 		// legacy alias for ":kanban".
 		for _, pfx := range []string{"kanban", "board"} {
@@ -2760,7 +2859,7 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		case "dashboard", "projects", "topics":
 			return m.enterDashboardView()
 		case "config":
-			return m.startConfig()
+			return m.openConfigFile()
 		case "all", "clear", "reset", "overdue", "pending", "done", "completed", "progress", "in-progress", "today", "week":
 			m.applyQuickFilter(cmdLower)
 		default:
@@ -2821,7 +2920,25 @@ func completeCommand(input string) string {
 		raw = strings.TrimPrefix(raw, ":")
 	}
 	cmd := strings.ToLower(raw)
-	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "help", "in-progress", "kanban", "overdue", "pending", "projects", "quit", "stage", "stats", "today", "week"}
+	// ":theme <Tab>" completes/cycles the available palette names, so users can
+	// discover the options without knowing them in advance.
+	if cmd == "theme" || strings.HasPrefix(cmd, "theme ") {
+		names := config.ThemePresetNames()
+		partial := strings.TrimSpace(strings.TrimPrefix(cmd, "theme"))
+		// An exact match advances to the next name, so repeated Tab cycles them.
+		for i, n := range names {
+			if n == partial {
+				return prefix + "theme " + names[(i+1)%len(names)]
+			}
+		}
+		for _, n := range names {
+			if strings.HasPrefix(n, partial) {
+				return prefix + "theme " + n
+			}
+		}
+		return prefix + "theme " + names[0]
+	}
+	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "help", "in-progress", "kanban", "overdue", "pending", "projects", "quit", "stage", "stats", "theme", "today", "week"}
 	if cmd == "" {
 		return prefix + commands[0]
 	}
@@ -3370,16 +3487,6 @@ type recurrenceSpec struct {
 	unit    string
 	weekday *time.Weekday
 	label   string
-}
-
-func recurrenceBadge(t storage.Task) string {
-	if !isRecurringTask(t) {
-		return ""
-	}
-	if summary := recurrenceSummary(t); summary != "" {
-		return fmt.Sprintf("[recur %s]", summary)
-	}
-	return "[recur]"
 }
 
 func recurrenceRuleLabel(t storage.Task) string {

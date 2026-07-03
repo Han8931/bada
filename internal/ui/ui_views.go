@@ -1026,7 +1026,8 @@ func (m Model) helpContent() string {
   :projects  Projects overview (progress, workflows, metadata)
   :kanban[t] Stage board for a project's workflow
   :stage <n> Filter list to a workflow stage
-  :config    Update config and db paths
+  :config    Open the config file in $EDITOR (reloads on save)
+  :theme     List palettes; :theme <name> switches presets
   :help / ?  Open this help screen
   :q / :quit Quit bada
 
@@ -1052,6 +1053,7 @@ Tasks:
   %s     Delete selected
   %s     Delete all done (with confirm)
   u      Undo last edit (status/priority/due/metadata)
+  %s      Toggle light/dark theme (saved to config)
 
 Sorting (press s, then):
   d due · p priority · t created · o topic · w stage · a auto · s state
@@ -1081,7 +1083,7 @@ Calendar:
   h/l day • j/k week • H/L month
   enter day detail • esc/q close
 
-`, m.cfg.Keys.Up, m.cfg.Keys.Down, m.cfg.Keys.Search, m.cfg.Keys.Quit, m.cfg.Keys.Add, m.cfg.Keys.Toggle, m.cfg.Keys.Delete, m.cfg.Keys.Edit, m.cfg.Keys.NoteView, m.cfg.Keys.Delete, m.cfg.Keys.DeleteAllDone), "\n")
+`, m.cfg.Keys.Up, m.cfg.Keys.Down, m.cfg.Keys.Search, m.cfg.Keys.Quit, m.cfg.Keys.Add, m.cfg.Keys.Toggle, m.cfg.Keys.Delete, m.cfg.Keys.Edit, m.cfg.Keys.NoteView, m.cfg.Keys.Delete, m.cfg.Keys.DeleteAllDone, m.cfg.Keys.ThemeToggle), "\n")
 }
 
 func (m Model) helpMaxScroll() int {
@@ -2093,21 +2095,19 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 	items := m.visibleItems()
 	inner := m.panelInnerWidth()
 
-	statusW := 11
+	statusW := 14
 	assigneeW := 7
 	reporterW := 7
-	topicW := 8
-	tagsW := 8
-	recurrenceW := 8
+	topicW := 14
 	dateW := 10
 	// Title leads the row and takes whatever the other columns don't: lead (2) +
-	// 10 non-title columns (83) + their 10 separating spaces = 95.
-	titleW := inner - 95
+	// 8 non-title columns (76) + their 8 separating spaces = 86.
+	titleW := inner - 86
 	if titleW < 10 {
 		titleW = 10
 	}
-	if titleW > 50 {
-		titleW = 50
+	if titleW > 60 {
+		titleW = 60
 	}
 
 	full := func(style lipgloss.Style, s string) string {
@@ -2153,8 +2153,6 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 		padRightWidth("Due-in", dateW),
 		sortCol("Due", "due", dateW),
 		padRightWidth("End", dateW),
-		padRightWidth("Recur", recurrenceW),
-		padRightWidth("Tags", tagsW),
 	}
 	header := "  " + strings.Join(headerCols, " ")
 	lines = append(lines, full(m.styles.TableHeader, header))
@@ -2185,16 +2183,14 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 			assignee := truncateText(emptyDash(it.task.Assignee), assigneeW)
 			reporter := truncateText(emptyDash(it.task.Reporter), reporterW)
 			topic := truncateText(topicListLabel(it.task.Topics), topicW)
-			tags := truncateText(emptyDash(it.task.Tags), tagsW)
 			dueIn := truncateText(relativeDueCell(it.task.Due), dateW)
 			due := truncateText(dateCell(it.task.Due), dateW)
 			end := truncateText(dateCell(it.task.End), dateW)
-			recurrence := truncateText(emptyDash(recurrenceSummary(it.task)), recurrenceW)
 			if due == "" {
 				due = "pending"
 			}
 			buildBody := func(statusField, priField string) string {
-				return fmt.Sprintf("  %-*s %s %-*s %-*s %-*s %s %-*s %-*s %-*s %-*s %-*s",
+				return fmt.Sprintf("  %-*s %s %-*s %-*s %-*s %s %-*s %-*s %-*s",
 					titleW, title,
 					statusField,
 					topicW, topic,
@@ -2203,17 +2199,11 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 					priField,
 					dateW, dueIn,
 					dateW, due,
-					dateW, end,
-					recurrenceW, recurrence,
-					tagsW, tags)
+					dateW, end)
 			}
 
-			recBadge := recurrenceBadge(it.task)
 			if selected {
 				body := buildBody(m.statusField(it.task, statusW, false), m.priorityField(it.task.Priority, false))
-				if recBadge != "" {
-					body += "  " + recBadge
-				}
 				itemLines = append(itemLines, full(m.styles.Selection, body))
 				continue
 			}
@@ -2224,21 +2214,12 @@ func (m Model) renderTaskListWithHeight(maxLines int) string {
 			switch {
 			case m.isTaskSelected(it.task.ID):
 				body := buildBody(m.statusField(it.task, statusW, false), m.priorityField(it.task.Priority, false))
-				if recBadge != "" {
-					body += "  " + m.styles.Warning.Render(recBadge)
-				}
 				line = full(m.styles.Warning, body)
 			case isDone(it.task):
 				body := buildBody(m.statusField(it.task, statusW, false), m.priorityField(it.task.Priority, false))
-				if recBadge != "" {
-					body += "  " + m.styles.Warning.Render(recBadge)
-				}
 				line = full(m.styles.Done, body)
 			default:
 				body := buildBody(m.statusField(it.task, statusW, true), m.priorityField(it.task.Priority, true))
-				if recBadge != "" {
-					body += "  " + m.styles.Warning.Render(recBadge)
-				}
 				line = full(lipgloss.NewStyle(), body)
 			}
 			itemLines = append(itemLines, line)

@@ -68,6 +68,11 @@ type noteEditedMsg struct {
 	err    error
 }
 
+// configEditedMsg is emitted after the external editor opened by :config exits.
+type configEditedMsg struct {
+	err error
+}
+
 type uiStyles struct {
 	Title          lipgloss.Style
 	Heading        lipgloss.Style
@@ -344,6 +349,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case noteEditedMsg:
 		return m.handleNoteEdited(msg)
+	case configEditedMsg:
+		return m.handleConfigEdited(msg)
 	case tea.KeyMsg:
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
@@ -636,6 +643,8 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 	case m.cfg.Keys.SortCreated:
 		m.applySortMode("created")
 		m.status = "Sorted by created time (" + m.sortDirLabel() + ")"
+	case m.cfg.Keys.ThemeToggle:
+		return m.toggleTheme()
 	case m.cfg.Keys.Trash, "T":
 		return m.enterTrashView()
 	case "?":
@@ -653,6 +662,20 @@ func (m Model) updateListMode(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// toggleTheme cycles to the next built-in preset (light → dark → purple → …),
+// rebuilds the styles so the change is visible immediately, and persists it.
+func (m Model) toggleTheme() (tea.Model, tea.Cmd) {
+	names := config.ThemePresetNames()
+	next := names[0]
+	for i, n := range names {
+		if strings.EqualFold(n, m.cfg.Theme.Preset) {
+			next = names[(i+1)%len(names)]
+			break
+		}
+	}
+	return m.applyThemeCommand(next)
 }
 
 func (m Model) View() string {

@@ -29,8 +29,14 @@ sort_created = "st"
 delete_all_done = "X"
 search = "/"
 note_view = "enter"
+theme_toggle = "t"   # cycle through the built-in presets live (also persists)
 
 [theme]
+# preset selects a built-in palette: "light" (default), "dark", "purple",
+# "ocean", "forest", "rose", or "graphite".
+# Any color below overrides the preset, so you can start from a preset and tweak one hue.
+# `:theme <name>` or theme_toggle ("t", cycles presets) also updates this on save.
+preset = "light"
 title = "#2563EB"
 heading = "#0F766E"
 accent = "#D97706"
@@ -47,24 +53,139 @@ status_alt_bg = "#0F766E"
 status_alt_fg = "#F8FAFC"
 row_stripe_bg = "#F1F5F9"  # faint tint on alternating task rows ("" disables)
 
-# --- Dark slate theme (taskdog-style) -----------------------------------
-# To switch, replace the [theme] block above with the values below.
+# --- Dark theme ----------------------------------------------------------
+# The quickest way to use it is `preset = "dark"` in the [theme] block above
+# (or just press "t" in the app). The explicit values below are equivalent and
+# provided if you want to hand-tune individual colors.
 # status_alt_bg/fg drive the framed table-header bar and the key-hint chips,
 # and border drives the rounded panel frames.
 #
 # [theme]
-# title        = "#7AA2F7"  # blue
-# heading      = "#89DDFF"  # cyan
-# accent       = "#FF9E64"  # orange
-# muted        = "#565F73"  # slate gray
-# success      = "#9ECE6A"  # green   (done)
-# warning      = "#E0AF68"  # amber   (pending / recurring)
-# danger       = "#F7768E"  # red     (overdue)
-# border       = "#414868"  # slate-blue panel frames
-# selection_bg = "#2E3C5D"  # blue selection bar
-# selection_fg = "#C0CAF5"
-# status_bg    = "#1F2430"
-# status_fg    = "#C0CAF5"
-# status_alt_bg = "#2A3F5F" # blue header bar / key chips
-# status_alt_fg = "#C0CAF5"
-# row_stripe_bg = "#1B202B" # faint tint on alternating task rows
+# preset       = "dark"
+# title        = "#8AB4F8"  # soft blue
+# heading      = "#7DD3FC"  # sky
+# accent       = "#F2CC60"  # warm yellow
+# muted        = "#8B949E"  # readable gray
+# success      = "#3FB950"  # green   (done)
+# warning      = "#D29922"  # amber   (pending / recurring)
+# danger       = "#F85149"  # red     (overdue)
+# border       = "#30363D"  # subtle panel frames
+# selection_bg = "#264F78"  # calm blue selection bar
+# selection_fg = "#F0F6FC"
+# status_bg    = "#161B22"
+# status_fg    = "#C9D1D9"
+# status_alt_bg = "#21262D" # neutral header bar / key chips
+# status_alt_fg = "#F0F6FC"
+# holiday_bg   = "#3D1722"  # subdued red tint
+# row_stripe_bg = "#11161D" # faint tint on alternating task rows
+
+# --- Purple theme --------------------------------------------------------
+# A violet-forward dark palette. Use `preset = "purple"` in the [theme] block
+# above, or copy these values if you want to hand-tune individual colors.
+#
+# [theme]
+# preset       = "purple"
+# title        = "#C4B5FD"  # lavender
+# heading      = "#DDD6FE"  # pale violet
+# accent       = "#F0ABFC"  # orchid
+# muted        = "#A1A1AA"  # soft gray
+# success      = "#34D399"  # mint    (done)
+# warning      = "#FBBF24"  # amber   (pending / recurring)
+# danger       = "#FB7185"  # rose    (overdue)
+# border       = "#4C1D95"  # deep violet frames
+# selection_bg = "#6D28D9"  # violet selection bar
+# selection_fg = "#FAF5FF"
+# status_bg    = "#1E1B2E"
+# status_fg    = "#E9D5FF"
+# status_alt_bg = "#2E1065" # purple header bar / key chips
+# status_alt_fg = "#F5F3FF"
+# holiday_bg   = "#4C1230"  # subdued rose tint
+# row_stripe_bg = "#211A33" # faint tint on alternating task rows
+
+# --- Ocean theme ---------------------------------------------------------
+# Cool cyan/blue palette for a calmer dark terminal.
+#
+# [theme]
+# preset       = "ocean"
+# title        = "#67E8F9"  # cyan
+# heading      = "#5EEAD4"  # teal
+# accent       = "#38BDF8"  # sky
+# muted        = "#94A3B8"  # slate
+# success      = "#2DD4BF"  # teal    (done)
+# warning      = "#FBBF24"  # amber   (pending / recurring)
+# danger       = "#FB7185"  # rose    (overdue)
+# border       = "#155E75"  # deep cyan frames
+# selection_bg = "#0E7490"  # cyan selection bar
+# selection_fg = "#ECFEFF"
+# status_bg    = "#082F49"
+# status_fg    = "#BAE6FD"
+# status_alt_bg = "#164E63" # blue-cyan header bar / key chips
+# status_alt_fg = "#ECFEFF"
+# holiday_bg   = "#4A1D2F"  # subdued rose tint
+# row_stripe_bg = "#0B2538" # faint tint on alternating task rows
+
+# --- Forest theme --------------------------------------------------------
+# Evergreen palette with warm amber accents.
+#
+# [theme]
+# preset       = "forest"
+# title        = "#BBF7D0"  # pale green
+# heading      = "#86EFAC"  # green
+# accent       = "#FACC15"  # yellow
+# muted        = "#9CA3AF"  # gray
+# success      = "#22C55E"  # green   (done)
+# warning      = "#F59E0B"  # amber   (pending / recurring)
+# danger       = "#F87171"  # red     (overdue)
+# border       = "#365314"  # moss frames
+# selection_bg = "#166534"  # green selection bar
+# selection_fg = "#F0FDF4"
+# status_bg    = "#172016"
+# status_fg    = "#DCFCE7"
+# status_alt_bg = "#1F3A1D" # forest header bar / key chips
+# status_alt_fg = "#F0FDF4"
+# holiday_bg   = "#451A2B"  # subdued rose tint
+# row_stripe_bg = "#141C13" # faint tint on alternating task rows
+
+# --- Rose theme ----------------------------------------------------------
+# Warm rose/magenta dark palette.
+#
+# [theme]
+# preset       = "rose"
+# title        = "#FDA4AF"  # rose
+# heading      = "#F9A8D4"  # pink
+# accent       = "#FBBF24"  # amber
+# muted        = "#A8A29E"  # warm gray
+# success      = "#4ADE80"  # green   (done)
+# warning      = "#F59E0B"  # amber   (pending / recurring)
+# danger       = "#F43F5E"  # rose    (overdue)
+# border       = "#881337"  # deep rose frames
+# selection_bg = "#BE185D"  # magenta selection bar
+# selection_fg = "#FFF1F2"
+# status_bg    = "#2A171C"
+# status_fg    = "#FFE4E6"
+# status_alt_bg = "#4C1026" # rose header bar / key chips
+# status_alt_fg = "#FFF1F2"
+# holiday_bg   = "#5F1234"  # subdued rose tint
+# row_stripe_bg = "#25161B" # faint tint on alternating task rows
+
+# --- Graphite theme ------------------------------------------------------
+# Low-chroma dark palette with a sharp lime accent.
+#
+# [theme]
+# preset       = "graphite"
+# title        = "#E5E7EB"  # near-white
+# heading      = "#CBD5E1"  # cool gray
+# accent       = "#A3E635"  # lime
+# muted        = "#9CA3AF"  # gray
+# success      = "#84CC16"  # lime    (done)
+# warning      = "#EAB308"  # yellow  (pending / recurring)
+# danger       = "#EF4444"  # red     (overdue)
+# border       = "#3F3F46"  # graphite frames
+# selection_bg = "#52525B"  # gray selection bar
+# selection_fg = "#FAFAFA"
+# status_bg    = "#18181B"
+# status_fg    = "#D4D4D8"
+# status_alt_bg = "#27272A" # neutral header bar / key chips
+# status_alt_fg = "#FAFAFA"
+# holiday_bg   = "#3F1D2A"  # subdued rose tint
+# row_stripe_bg = "#202024" # faint tint on alternating task rows
