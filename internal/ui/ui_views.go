@@ -10,7 +10,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
-	"bada/internal/config"
 	"bada/internal/storage"
 )
 
@@ -283,10 +282,11 @@ func (m Model) shiftReportTaskDue(days int) (tea.Model, tea.Cmd) {
 		m.status = "No agenda task selected"
 		return m, nil
 	}
-	if err := m.store.ShiftDue(t.ID, days); err != nil {
+	if _, err := m.store.ShiftDue(t.ID, days); err != nil {
 		m.status = fmt.Sprintf("shift due failed: %v", err)
 		return m, nil
 	}
+	m.snapshotUndo(t, "due change")
 	var err error
 	m.tasks, err = m.store.FetchTasks()
 	if err != nil {
@@ -951,13 +951,6 @@ func weekIndexForDay(weeks [][]time.Time, day time.Time) int {
 	return 0
 }
 
-func padRight(text string, width int) string {
-	if len(text) >= width {
-		return text
-	}
-	return text + strings.Repeat(" ", width-len(text))
-}
-
 func padRightWidth(text string, width int) string {
 	if width <= 0 {
 		return ""
@@ -1572,11 +1565,6 @@ func (m Model) renderGanttView() string {
 		body = m.renderTimelinePaneBody(-1)
 	}
 	return m.panel(m.timelinePanelTitle(), body) + "\n" + footer
-}
-
-func renderHelp(k config.Keymap) string {
-	return fmt.Sprintf("%s/%s move • %s add • space select • %s/%s detail • %s done • %s purge • %s edit • %s notes • %s rename • %s/%s prio • %s/%s due • %s/%s/%s sort • %s trash • %s search • %s quit",
-		k.Up, k.Down, k.Add, k.Detail, k.Confirm, k.Toggle, k.Delete, k.Edit, k.NoteView, k.Rename, k.PriorityUp, k.PriorityDown, k.DueForward, k.DueBack, k.SortDue, k.SortPriority, k.SortCreated, k.Trash, k.Search, k.Quit)
 }
 
 func (m Model) renderTaskList() string {

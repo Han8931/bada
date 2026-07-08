@@ -1142,6 +1142,7 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		recurring = true
 	}
 
+	var prevTask *storage.Task
 	if taskID == 0 {
 		newID, err := m.store.AddTask(title)
 		if err != nil {
@@ -1149,8 +1150,10 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		}
 		taskID = newID
 	} else if idx := m.findTaskIndex(taskID); idx >= 0 {
-		// Snapshot the pre-edit state so u can revert a metadata edit.
-		m.snapshotUndo(m.tasks[idx], "edit")
+		// Remember the pre-edit state; it becomes the undo snapshot once the
+		// writes below have succeeded.
+		prev := m.tasks[idx]
+		prevTask = &prev
 	}
 	if err := m.store.UpdateTaskMetadata(taskID, m.meta.topic, m.meta.tags, m.meta.assignee, m.meta.reporter, timezone, priority, due, start, end, recurring); err != nil {
 		return m, err
@@ -1172,6 +1175,9 @@ func (m Model) applyMetadataAndReload() (Model, error) {
 		if err := m.store.UpdateTaskNotes(taskID, m.meta.notes); err != nil {
 			return m, err
 		}
+	}
+	if prevTask != nil {
+		m.snapshotUndo(*prevTask, "edit")
 	}
 
 	tasks, err := m.store.FetchTasks()
@@ -1207,7 +1213,7 @@ func parseDate(v string) (sql.NullTime, error) {
 	if v == "" {
 		return sql.NullTime{}, nil
 	}
-	t, err := time.Parse("2006-01-02", v)
+	t, err := time.ParseInLocation("2006-01-02", v, time.Local)
 	if err != nil {
 		return sql.NullTime{}, err
 	}
@@ -1221,7 +1227,7 @@ func parseDateTime(v string) (sql.NullTime, error) {
 	}
 	layouts := []string{"2006-01-02 15:04", "2006-01-02"}
 	for _, layout := range layouts {
-		if t, err := time.Parse(layout, v); err == nil {
+		if t, err := time.ParseInLocation(layout, v, time.Local); err == nil {
 			return sql.NullTime{Time: t, Valid: true}, nil
 		}
 	}
@@ -3244,11 +3250,11 @@ func (m Model) bumpPriority(delta int) (tea.Model, tea.Cmd) {
 	if newPrio > maxPriority {
 		newPrio = maxPriority
 	}
-	m.snapshotUndo(t, "priority change")
 	if err := m.store.UpdatePriority(t.ID, newPrio); err != nil {
 		m.status = fmt.Sprintf("priority failed: %v", err)
 		return m, nil
 	}
+	m.snapshotUndo(t, "priority change")
 	if idx := m.findTaskIndex(t.ID); idx >= 0 && idx < len(m.tasks) {
 		m.tasks[idx].Priority = newPrio
 	}
@@ -3266,16 +3272,12 @@ func (m Model) shiftDue(days int) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	m.snapshotUndo(t, "due change")
-	if err := m.store.ShiftDue(t.ID, days); err != nil {
+	newTime, err := m.store.ShiftDue(t.ID, days)
+	if err != nil {
 		m.status = fmt.Sprintf("shift due failed: %v", err)
 		return m, nil
 	}
-	base := time.Now().UTC()
-	if t.Due.Valid {
-		base = t.Due.Time
-	}
-	newTime := base.AddDate(0, 0, days)
+	m.snapshotUndo(t, "due change")
 	if idx := m.findTaskIndex(t.ID); idx >= 0 && idx < len(m.tasks) {
 		m.tasks[idx].Due = sql.NullTime{Time: newTime, Valid: true}
 	}
@@ -3781,7 +3783,14 @@ func isOverdue(t storage.Task) bool {
 	if !t.Due.Valid {
 		return false
 	}
-	return time.Now().After(t.Due.Time)
+	due := t.Due.Time
+	// Date-only dues (midnight, shown without a clock time) count as due
+	// through the end of that day — matching the agenda, which only calls a
+	// task overdue once its due day has passed.
+	if due.Hour() == 0 && due.Minute() == 0 && due.Second() == 0 {
+		due = due.AddDate(0, 0, 1)
+	}
+	return time.Now().After(due)
 }
 
 func (m *Model) processSortKey(key string) bool {
@@ -4113,14 +4122,12 @@ func dateCell(t sql.NullTime) string {
 
 // relativeDueCell renders a due date relative to today — "today", "tomorrow",
 // "yesterday", "in Nd", or "Nd ago". An empty due renders "-". Days are counted
-// on UTC calendar boundaries to stay consistent with the absolute date cells.
+// on local calendar boundaries to match the absolute date cells.
 func relativeDueCell(t sql.NullTime) string {
 	if !t.Valid {
 		return "-"
 	}
-	today := normalizeDate(time.Now().UTC())
-	due := normalizeDate(t.Time.UTC())
-	days := int((due.Unix() - today.Unix()) / 86400)
+	days := dayIndexUTC(t.Time, time.Now())
 	switch {
 	case days == 0:
 		return "today"
@@ -4152,19 +4159,6 @@ func filterDate(v string) string {
 			b.WriteRune(r)
 		}
 		if b.Len() >= 10 {
-			break
-		}
-	}
-	return b.String()
-}
-
-func filterDateTime(v string) string {
-	var b strings.Builder
-	for _, r := range v {
-		if (r >= '0' && r <= '9') || r == '-' || r == ':' || r == ' ' {
-			b.WriteRune(r)
-		}
-		if b.Len() >= 16 {
 			break
 		}
 	}
@@ -4274,20 +4268,6 @@ func dueePreview(v string, now time.Time) string {
 		return t.Time.Format("Mon 2006-01-02")
 	}
 	return t.Time.Format("Mon 2006-01-02 15:04")
-}
-
-func filterYN(v string) string {
-	if v == "" {
-		return ""
-	}
-	r := strings.ToLower(strings.TrimSpace(v))
-	if len(r) == 0 {
-		return ""
-	}
-	if r[0] == 'y' || r[0] == 'n' {
-		return string(r[0])
-	}
-	return ""
 }
 
 func filterRule(v string) string {

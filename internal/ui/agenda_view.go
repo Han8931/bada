@@ -439,10 +439,10 @@ func (m Model) renderAgendaWeek(now time.Time) string {
 		day := start.AddDate(0, 0, i)
 		label := day.Format("Mon")[:1]
 		glyph := "·"
-		if counts[i] > 0 {
-			lvl := 0
-			if max > 0 {
-				lvl = (counts[i] - 1) * (len(bars) - 1) / max
+		if counts[i] > 0 && max > 0 {
+			lvl := counts[i] * (len(bars) - 1) / max
+			if lvl > len(bars)-1 {
+				lvl = len(bars) - 1
 			}
 			glyph = string(bars[lvl])
 		}

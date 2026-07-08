@@ -17,7 +17,8 @@ Removes the bada binary installed by install.sh. By default it removes:
 
 With --purge it also deletes user data:
   - config dir:  ${XDG_CONFIG_HOME:-~/.config}/bada
-  - cache dir:   ${XDG_CACHE_HOME:-~/.cache}/bada (includes the DB and trash)
+  - data dir:    ${XDG_DATA_HOME:-~/.local/share}/bada (the DB and trash)
+  - cache dir:   ${XDG_CACHE_HOME:-~/.cache}/bada (legacy DB location)
 EOF
 }
 
@@ -87,8 +88,9 @@ done
 # 4. Optionally purge user data.
 if [[ "${PURGE}" -eq 1 ]]; then
   CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/bada"
+  DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/bada"
   CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/bada"
-  for dir in "${CONFIG_DIR}" "${CACHE_DIR}"; do
+  for dir in "${CONFIG_DIR}" "${DATA_DIR}" "${CACHE_DIR}"; do
     if [[ -d "${dir}" ]]; then
       rm -rf "${dir}"
       echo "Purged ${dir}"

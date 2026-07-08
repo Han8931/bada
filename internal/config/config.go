@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,74 +313,38 @@ func applyAgendaDefaults(cfg *Config) {
 
 func applyKeyDefaults(cfg *Config) {
 	def := defaultConfig().Keys
-	if cfg.Keys.Quit == "" {
-		cfg.Keys.Quit = def.Quit
-	}
-	if cfg.Keys.Add == "" {
-		cfg.Keys.Add = def.Add
-	}
-	if cfg.Keys.Up == "" {
-		cfg.Keys.Up = def.Up
-	}
-	if cfg.Keys.Down == "" {
-		cfg.Keys.Down = def.Down
-	}
-	if cfg.Keys.Toggle == "" {
-		cfg.Keys.Toggle = def.Toggle
-	}
-	if cfg.Keys.Delete == "" {
-		cfg.Keys.Delete = def.Delete
-	}
-	if cfg.Keys.Detail == "" {
-		cfg.Keys.Detail = def.Detail
-	}
-	if cfg.Keys.Confirm == "" {
-		cfg.Keys.Confirm = def.Confirm
-	}
-	if cfg.Keys.Cancel == "" {
-		cfg.Keys.Cancel = def.Cancel
-	}
-	if cfg.Keys.Edit == "" {
-		cfg.Keys.Edit = def.Edit
-	}
-	if cfg.Keys.Trash == "" {
-		cfg.Keys.Trash = def.Trash
-	}
-	if cfg.Keys.Rename == "" {
-		cfg.Keys.Rename = def.Rename
-	}
-	if cfg.Keys.PriorityUp == "" {
-		cfg.Keys.PriorityUp = def.PriorityUp
-	}
-	if cfg.Keys.PriorityDown == "" {
-		cfg.Keys.PriorityDown = def.PriorityDown
-	}
-	if cfg.Keys.DueForward == "" {
-		cfg.Keys.DueForward = def.DueForward
-	}
-	if cfg.Keys.DueBack == "" {
-		cfg.Keys.DueBack = def.DueBack
-	}
-	if cfg.Keys.SortDue == "" {
-		cfg.Keys.SortDue = def.SortDue
-	}
-	if cfg.Keys.SortPriority == "" {
-		cfg.Keys.SortPriority = def.SortPriority
-	}
-	if cfg.Keys.SortCreated == "" {
-		cfg.Keys.SortCreated = def.SortCreated
-	}
-	if cfg.Keys.DeleteAllDone == "" {
-		cfg.Keys.DeleteAllDone = def.DeleteAllDone
-	}
-	if cfg.Keys.Search == "" {
-		cfg.Keys.Search = def.Search
-	}
-	if cfg.Keys.NoteView == "" {
-		cfg.Keys.NoteView = def.NoteView
-	}
-	if cfg.Keys.ThemeToggle == "" {
-		cfg.Keys.ThemeToggle = def.ThemeToggle
+	k := &cfg.Keys
+	for _, f := range []struct {
+		dst *string
+		def string
+	}{
+		{&k.Quit, def.Quit},
+		{&k.Add, def.Add},
+		{&k.Up, def.Up},
+		{&k.Down, def.Down},
+		{&k.Toggle, def.Toggle},
+		{&k.Delete, def.Delete},
+		{&k.Detail, def.Detail},
+		{&k.Confirm, def.Confirm},
+		{&k.Cancel, def.Cancel},
+		{&k.Edit, def.Edit},
+		{&k.Trash, def.Trash},
+		{&k.Rename, def.Rename},
+		{&k.PriorityUp, def.PriorityUp},
+		{&k.PriorityDown, def.PriorityDown},
+		{&k.DueForward, def.DueForward},
+		{&k.DueBack, def.DueBack},
+		{&k.SortDue, def.SortDue},
+		{&k.SortPriority, def.SortPriority},
+		{&k.SortCreated, def.SortCreated},
+		{&k.DeleteAllDone, def.DeleteAllDone},
+		{&k.Search, def.Search},
+		{&k.NoteView, def.NoteView},
+		{&k.ThemeToggle, def.ThemeToggle},
+	} {
+		if *f.dst == "" {
+			*f.dst = f.def
+		}
 	}
 }
 
@@ -468,6 +433,9 @@ func DefaultConfigDir() string {
 	return "bada"
 }
 
+// DefaultCacheDir is the legacy location of the DB and trash. It is only used
+// to migrate old installs; user data now lives in DefaultDataDir, since cache
+// directories are fair game for cleanup tools.
 func DefaultCacheDir() string {
 	if dir := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); dir != "" {
 		return filepath.Join(dir, "bada")
@@ -478,16 +446,75 @@ func DefaultCacheDir() string {
 	return "bada-cache"
 }
 
+// DefaultDataDir is where the DB and trash live: XDG_DATA_HOME/bada, falling
+// back to ~/.local/share/bada.
+func DefaultDataDir() string {
+	if dir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dir != "" {
+		return filepath.Join(dir, "bada")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local", "share", "bada")
+	}
+	return "bada-data"
+}
+
 func DefaultConfigPath() string {
 	return filepath.Join(DefaultConfigDir(), DefaultConfigFileName)
 }
 
 func DefaultDBPath() string {
-	return filepath.Join(DefaultCacheDir(), DefaultDBName)
+	return filepath.Join(DefaultDataDir(), DefaultDBName)
 }
 
 func DefaultTrashPath() string {
-	return filepath.Join(DefaultCacheDir(), DefaultTrashDir)
+	return filepath.Join(DefaultDataDir(), DefaultTrashDir)
+}
+
+// MigrateCacheData moves the DB and trash out of the legacy cache directory
+// into the data directory when the config still points at the old defaults,
+// then rewrites the config. A config that names any other path is left alone.
+// Returns true when the config was updated.
+func MigrateCacheData(cfg *Config, configPath string) (bool, error) {
+	oldDB := filepath.Join(DefaultCacheDir(), DefaultDBName)
+	oldTrash := filepath.Join(DefaultCacheDir(), DefaultTrashDir)
+	changed := false
+	if cfg.DBPath == oldDB {
+		newDB := DefaultDBPath()
+		if err := moveIfExists(oldDB, newDB); err != nil {
+			return false, err
+		}
+		cfg.DBPath = newDB
+		changed = true
+	}
+	if cfg.TrashDir == oldTrash {
+		newTrash := DefaultTrashPath()
+		if err := moveIfExists(oldTrash, newTrash); err != nil {
+			return changed, err
+		}
+		cfg.TrashDir = newTrash
+		changed = true
+	}
+	if changed {
+		if err := Save(configPath, *cfg); err != nil {
+			return changed, err
+		}
+	}
+	return changed, nil
+}
+
+// moveIfExists renames old to new. A missing old path is fine (the caller just
+// repoints the config); an existing new path aborts rather than overwrite.
+func moveIfExists(oldPath, newPath string) error {
+	if _, err := os.Stat(oldPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return fmt.Errorf("both %s and %s exist; move or remove one, then restart", oldPath, newPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(oldPath, newPath)
 }
 
 func ResolveConfigPath() string {

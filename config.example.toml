@@ -1,3 +1,5 @@
+# Where task data lives. Relative paths resolve against the working directory,
+# so prefer absolute ones. Defaults: $XDG_DATA_HOME/bada (~/.local/share/bada).
 db_path = "bada.db"
 default_filter = "all"
 trash_dir = "trash"

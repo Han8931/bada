@@ -167,11 +167,11 @@ func (m Model) moveBoardTask(stages []storage.Stage, dir int) (tea.Model, tea.Cm
 	if next == cur {
 		return m, nil
 	}
-	m.snapshotUndo(task, "stage move")
 	if err := m.setTaskStatusTo(task, stages[next].Name); err != nil {
 		m.status = fmt.Sprintf("move failed: %v", err)
 		return m, nil
 	}
+	m.snapshotUndo(task, "stage move")
 	// Follow the task into its new column.
 	m.boardCol = next
 	if _, cols, ok := m.boardColumns(); ok {

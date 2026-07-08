@@ -22,6 +22,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Older installs kept the DB in the cache directory; move it to the data
+	// dir so cache cleanup can't wipe task history. On failure, keep running
+	// against the old location.
+	if _, err := config.MigrateCacheData(&cfg, configPath); err != nil {
+		fmt.Printf("warning: could not move data out of the cache directory: %v\n", err)
+	}
+
 	store, err := storage.Open(cfg.DBPath, cfg.TrashDir)
 	if err != nil {
 		fmt.Printf("failed to open database: %v\n", err)

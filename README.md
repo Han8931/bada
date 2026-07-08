@@ -170,9 +170,16 @@ legend, and a key-hint footer. Two notable theme keys drive the framing:
 See `config.example.toml` for the full `[theme]` section and explicit palette
 values.
 
+## Data locations
+
+- Config: `$XDG_CONFIG_HOME/bada/config.toml` (default `~/.config/bada/config.toml`).
+- Database and trash: `$XDG_DATA_HOME/bada` (default `~/.local/share/bada`).
+  Older installs kept these under `~/.cache/bada`; on startup bada moves them to
+  the data directory and updates the config automatically.
+
 ## Trash
 
-- Deleted tasks are archived as JSON snapshots in `trash_dir` (default `trash/`).
+- Deleted tasks are archived as JSON snapshots in `trash_dir` (default `~/.local/share/bada/trash`).
 - Press `T` to open Trash; `space` multi-selects (auto-advances), `u` restores selected/current, `P` purges (with confirm), `esc`/`q` exits.
 - Status bar shows cursor, selection count, and trash path; clear the folder to purge manually if needed.
 
@@ -238,11 +245,6 @@ with. To also delete user data (config, DB, and trash):
 * **Strategic Advisory:** AI analyzes your task list to suggest the most efficient order of operations (e.g., "Group these three errands together to save time").
 * **Automated Project Planning:** Generate a multi-step task breakdown from a single high-level goal (e.g., "Plan a 3-day hiking trip").
 * Writing features: email or report. 
-
-
-This is a comprehensive and well-thought-out feature set. It strikes a great balance between a "power user" CLI/TUI application and modern AI-driven productivity.
-
-I have polished your existing list for clarity and professional terminology, then added a section of "Next-Level Ideas" to further differentiate your project.
 
 
 ## New Ideas to Consider

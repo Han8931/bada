@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"bada/internal/config"
 	"bada/internal/storage"
@@ -912,6 +913,8 @@ func (m Model) renderFooterPanel() string {
 	}
 }
 
+// wrapText greedily wraps words to the given display width (not byte count,
+// so wide CJK runes wrap where they actually overflow).
 func wrapText(text string, width int) string {
 	if width <= 0 {
 		return text
@@ -922,14 +925,18 @@ func wrapText(text string, width int) string {
 	}
 	var b strings.Builder
 	line := words[0]
+	lineW := runewidth.StringWidth(line)
 	for _, word := range words[1:] {
-		if len(line)+1+len(word) > width {
+		w := runewidth.StringWidth(word)
+		if lineW+1+w > width {
 			b.WriteString(line)
 			b.WriteString("\n")
 			line = word
+			lineW = w
 			continue
 		}
 		line += " " + word
+		lineW += 1 + w
 	}
 	b.WriteString(line)
 	return b.String()
@@ -1036,12 +1043,12 @@ func (m *Model) reload() error {
 // done flag, and reloads. Returns the new status label. Centralizing this is
 // what keeps done-derivation consistent across every rotate entry point.
 func (m *Model) advanceTaskStatus(t storage.Task) (string, error) {
-	m.snapshotUndo(t, "status change")
 	next := m.nextTaskStatus(t)
 	done := m.statusMeansDone(t, next)
 	if err := m.store.SetStatus(t.ID, next, done); err != nil {
 		return "", err
 	}
+	m.snapshotUndo(t, "status change")
 	if err := m.reload(); err != nil {
 		return next, err
 	}

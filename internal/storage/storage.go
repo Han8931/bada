@@ -265,7 +265,6 @@ func (s *Store) dropLegacyTopicColumn() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	hasTopic := false
 	for rows.Next() {
 		var cid int
@@ -273,6 +272,7 @@ func (s *Store) dropLegacyTopicColumn() error {
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
 			return err
 		}
 		if name == "topic" {
@@ -281,10 +281,26 @@ func (s *Store) dropLegacyTopicColumn() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	// Close before writing: the pool holds a single connection, so a write
+	// issued while these rows are open would wait on it forever.
+	if err := rows.Close(); err != nil {
 		return err
 	}
 	if !hasTopic {
 		return nil
+	}
+	// Carry the single-topic values into task_topics (and primary_topic) before
+	// dropping the column, so an old DB keeps its topic assignments.
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO task_topics (task_id, topic)
+SELECT id, TRIM(topic) FROM tasks WHERE TRIM(COALESCE(topic, '')) != '';`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE tasks SET primary_topic = TRIM(topic)
+WHERE TRIM(COALESCE(topic, '')) != '' AND TRIM(COALESCE(primary_topic, '')) = '';`); err != nil {
+		return err
 	}
 	_, err = s.db.Exec(`ALTER TABLE tasks DROP COLUMN topic;`)
 	return err
@@ -351,7 +367,7 @@ func (s *Store) FetchTasks() ([]Task, error) {
 }
 
 func (s *Store) AddTask(title string) (int, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().Format(time.RFC3339)
 	res, err := s.db.Exec(`INSERT INTO tasks (title, done, status, created_at) VALUES (?, 0, 'PENDING', ?);`, title, now)
 	if err != nil {
 		return 0, err
@@ -361,19 +377,6 @@ func (s *Store) AddTask(title string) (int, error) {
 		return 0, err
 	}
 	return int(id), nil
-}
-
-func (s *Store) SetDone(id int, done bool) error {
-	val := 0
-	status := "PENDING"
-	completed := sql.NullString{}
-	if done {
-		val = 1
-		status = "DONE"
-		completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
-	}
-	_, err := s.db.Exec(`UPDATE tasks SET done = ?, status = ?, completed_at = ? WHERE id = ?;`, val, status, completed, id)
-	return err
 }
 
 // SetStatus updates a task's status string and its done flag. The caller decides
@@ -393,7 +396,7 @@ func (s *Store) SetStatus(id int, status string, done bool) error {
 		if prevDone == 1 && prevCompleted.Valid {
 			completed = prevCompleted // already done; preserve original completion time
 		} else {
-			completed = sql.NullString{String: time.Now().UTC().Format(time.RFC3339), Valid: true}
+			completed = sql.NullString{String: time.Now().Format(time.RFC3339), Valid: true}
 		}
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET status = ?, done = ?, completed_at = ? WHERE id = ?;`, status, boolToInt(done), completed, id)
@@ -437,21 +440,22 @@ func (s *Store) DeleteDoneTasks() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Delete exactly the rows that were snapshotted to trash, never a broader
+	// `WHERE done = 1`, so no task can be dropped without a trash copy.
+	var rows int64
 	for _, task := range doneTasks {
 		if _, err := tx.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, task.ID); err != nil {
 			tx.Rollback()
 			return 0, err
 		}
-	}
-	res, err := tx.Exec(`DELETE FROM tasks WHERE done = 1;`)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		tx.Rollback()
-		return 0, err
+		res, err := tx.Exec(`DELETE FROM tasks WHERE id = ?;`, task.ID)
+		if err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			rows += n
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -571,37 +575,35 @@ func (s *Store) UpdatePriority(id int, priority int) error {
 	return err
 }
 
-func (s *Store) ShiftDue(id int, days int) error {
+// ShiftDue moves a task's due date by the given number of days (seeding from
+// now when it has none) and returns the resulting due time, so callers don't
+// re-derive it.
+func (s *Store) ShiftDue(id int, days int) (time.Time, error) {
 	var current sql.NullString
 	err := s.db.QueryRow(`SELECT due FROM tasks WHERE id = ?;`, id).Scan(&current)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	var base time.Time
 	if current.Valid {
-		base = parseTimeWithFallback(current.String)
-	} else {
-		base = time.Now().UTC()
+		base = parseWallTime(current.String)
+	}
+	if base.IsZero() {
+		base = time.Now()
 	}
 	newTime := base.AddDate(0, 0, days)
-	newStr := sql.NullString{String: newTime.UTC().Format(time.RFC3339), Valid: true}
+	newStr := sql.NullString{String: newTime.Format(time.RFC3339), Valid: true}
 	_, err = s.db.Exec(`UPDATE tasks SET due = ? WHERE id = ?;`, newStr, id)
-	return err
+	if err != nil {
+		return time.Time{}, err
+	}
+	return newTime, nil
 }
 
 func (s *Store) UpdateTaskMetadata(id int, topic, tags, assignee, reporter, timezone string, priority int, due, start, end sql.NullTime, recurring bool) error {
-	dueStr := sql.NullString{}
-	if due.Valid {
-		dueStr = sql.NullString{String: due.Time.UTC().Format(time.RFC3339), Valid: true}
-	}
-	startStr := sql.NullString{}
-	if start.Valid {
-		startStr = sql.NullString{String: start.Time.UTC().Format(time.RFC3339), Valid: true}
-	}
-	endStr := sql.NullString{}
-	if end.Valid {
-		endStr = sql.NullString{String: end.Time.UTC().Format(time.RFC3339), Valid: true}
-	}
+	dueStr := nullTimeToString(due)
+	startStr := nullTimeToString(start)
+	endStr := nullTimeToString(end)
 	rec := 0
 	if recurring {
 		rec = 1
@@ -783,7 +785,7 @@ func (s *Store) TopicMeta(topic string) (TopicMeta, error) {
 	meta.Description = desc.String
 	meta.Archived = archived.Int64 == 1
 	if target.Valid {
-		if parsed := parseTimeWithFallback(target.String); !parsed.IsZero() {
+		if parsed := parseWallTime(target.String); !parsed.IsZero() {
 			meta.TargetDate = sql.NullTime{Time: parsed, Valid: true}
 		}
 	}
@@ -807,7 +809,7 @@ func (s *Store) AllTopicMeta() (map[string]TopicMeta, error) {
 		}
 		meta := TopicMeta{Topic: topic, Notes: notes.String, Description: desc.String, Archived: archived.Int64 == 1}
 		if target.Valid {
-			if parsed := parseTimeWithFallback(target.String); !parsed.IsZero() {
+			if parsed := parseWallTime(target.String); !parsed.IsZero() {
 				meta.TargetDate = sql.NullTime{Time: parsed, Valid: true}
 			}
 		}
@@ -991,37 +993,6 @@ func (s *Store) fetchDoneTasks() ([]Task, error) {
 	return tasks, nil
 }
 
-func (s *Store) fetchTasksByTopic(topic string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT tasks.id, tasks.title, tasks.done, tasks.status, tasks.tags, tasks.assignee, tasks.reporter, tasks.due, tasks.start_at, tasks.end_at, tasks.timezone, tasks.priority,
-tasks.recurring, tasks.recurrence_rule, tasks.recurrence_interval, tasks.notes, tasks.primary_topic, tasks.created_at, tasks.completed_at
-FROM tasks
-INNER JOIN task_topics ON tasks.id = task_topics.task_id
-WHERE task_topics.topic = ?
-ORDER BY tasks.id;`, topic)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tasks []Task
-	var ids []int
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, t)
-		ids = append(ids, t.ID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := s.attachTopics(tasks, ids); err != nil {
-		return nil, err
-	}
-	return tasks, nil
-}
-
 func (s *Store) attachTopics(tasks []Task, ids []int) error {
 	if len(ids) == 0 {
 		return nil
@@ -1109,18 +1080,6 @@ func normalizeTopics(topics []string) []string {
 	return out
 }
 
-func (s *Store) setTaskTopics(id int, topics []string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if err := s.setTaskTopicsTx(tx, id, topics); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
-
 func (s *Store) setTaskTopicsTx(tx *sql.Tx, id int, topics []string) error {
 	topics = normalizeTopics(topics)
 	if _, err := tx.Exec(`DELETE FROM task_topics WHERE task_id = ?;`, id); err != nil {
@@ -1196,19 +1155,19 @@ func scanTask(scanner rowScanner) (Task, error) {
 		t.Reporter = reporter.String
 	}
 	if dueStr.Valid {
-		parsed := parseTimeWithFallback(dueStr.String)
+		parsed := parseWallTime(dueStr.String)
 		if !parsed.IsZero() {
 			t.Due = sql.NullTime{Time: parsed, Valid: true}
 		}
 	}
 	if startStr.Valid {
-		parsed := parseTimeWithFallback(startStr.String)
+		parsed := parseWallTime(startStr.String)
 		if !parsed.IsZero() {
 			t.Start = sql.NullTime{Time: parsed, Valid: true}
 		}
 	}
 	if endStr.Valid {
-		parsed := parseTimeWithFallback(endStr.String)
+		parsed := parseWallTime(endStr.String)
 		if !parsed.IsZero() {
 			t.End = sql.NullTime{Time: parsed, Valid: true}
 		}
@@ -1301,11 +1260,13 @@ func sanitizeFilename(title string) string {
 	return res
 }
 
+// nullTimeToString serializes a time as RFC3339 in its own location, so local
+// wall-clock dates keep their face value and true instants keep their offset.
 func nullTimeToString(t sql.NullTime) sql.NullString {
 	if !t.Valid {
 		return sql.NullString{}
 	}
-	return sql.NullString{String: t.Time.UTC().Format(time.RFC3339), Valid: true}
+	return sql.NullString{String: t.Time.Format(time.RFC3339), Valid: true}
 }
 
 func boolToInt(v bool) int {
@@ -1315,6 +1276,9 @@ func boolToInt(v bool) int {
 	return 0
 }
 
+// parseTimeWithFallback parses an RFC3339 (or bare-date) string as a true
+// instant, preserving whatever offset it was stored with. Use it for event
+// timestamps (created_at, completed_at).
 func parseTimeWithFallback(val string) time.Time {
 	if val == "" {
 		return time.Time{}
@@ -1326,6 +1290,18 @@ func parseTimeWithFallback(val string) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+// parseWallTime parses a stored date at face value: whatever wall-clock time
+// the string shows is rebuilt in the local timezone. Use it for user-facing
+// dates (due, start, end, target) so rows written under another offset —
+// including legacy rows stored as UTC — keep the date the user typed.
+func parseWallTime(val string) time.Time {
+	t := parseTimeWithFallback(val)
+	if t.IsZero() {
+		return t
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local)
 }
 
 func sqliteDSN(path string) string {
