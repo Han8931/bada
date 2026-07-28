@@ -126,8 +126,15 @@ func (m Model) renderNoteView() string {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	for _, line := range bodyLines[start:end] {
+	shown := bodyLines[start:end]
+	for _, line := range shown {
 		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	// Pad the body region out to its full height so the "Press …" hint stays
+	// pinned to the bottom (just above the status bar) instead of floating
+	// directly under a short note.
+	for i := len(shown); i < available; i++ {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")

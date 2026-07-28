@@ -249,6 +249,30 @@ func TestNoteViewNeverOverflowsWidth(t *testing.T) {
 	}
 }
 
+// TestNoteViewHintPinnedToBottom guards that the "Press …" hint sits on the last
+// row above the status bar instead of floating right under a short note.
+func TestNoteViewHintPinnedToBottom(t *testing.T) {
+	m := newTestModel(t)
+	m.width = 90
+	m.height = 24
+	m.tasks = []storage.Task{
+		{ID: 1, Title: "Short note task", Status: "PENDING", CreatedAt: time.Now(), Notes: "one line"},
+	}
+	r, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open note view
+	m = r.(Model)
+	if m.mode != modeNote {
+		t.Fatalf("Enter should open the note view, mode=%d", m.mode)
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("expected %d rendered rows, got %d", m.height, len(lines))
+	}
+	hint := len(lines) - 2 // last row is the status bar
+	if !strings.Contains(lines[hint], "to close") {
+		t.Fatalf("hint should be on row %d (just above the status bar), got %q", hint, lines[hint])
+	}
+}
+
 // TestStatusBarLeavesLastCellFree guards the alt-screen "duplicate status bar /
 // header disappears" scroll: rendered rows must stop short of the full width so
 // writing near the bottom-right edge can't leave the terminal in a pending-wrap
