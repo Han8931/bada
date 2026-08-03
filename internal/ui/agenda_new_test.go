@@ -92,4 +92,64 @@ func TestAgendaWidthSafe(t *testing.T) {
 	}
 }
 
+// TestAgendaCenteredColumn confirms the launch screen is a centered column (the
+// gorae / meari style): the wordmark sits in the middle of the terminal, its
+// glyph rows share one left edge, and the agenda rows below are indented as a
+// block with roughly equal margins on both sides.
+func TestAgendaCenteredColumn(t *testing.T) {
+	m := agendaSeed(t)
+	m.width, m.height = 140, 40
+	m.refreshReport()
+
+	lines := strings.Split(stripAnsiTest(stripEraseTest(m.View())), "\n")
+	// The wordmark is the first block in the view; its six rows run consecutively.
+	top := -1
+	for i, l := range lines {
+		if strings.Contains(l, "██████╗") {
+			top = i
+			break
+		}
+	}
+	if top < 0 || top+6 > len(lines) {
+		t.Fatalf("no wordmark in the agenda view:\n%s", strings.Join(lines, "\n"))
+	}
+	bannerRows := lines[top : top+6]
+	indent := leadingSpacesTest(bannerRows[0])
+	for i, row := range bannerRows {
+		if got := leadingSpacesTest(row); got != indent {
+			t.Errorf("wordmark row %d starts at column %d, want %d (rows must share a left edge)", i, got, indent)
+		}
+	}
+	// The wordmark is 32 cells wide; centered in 140 it starts near column 54.
+	if want := (m.width - 32) / 2; indent < want-2 || indent > want+2 {
+		t.Errorf("wordmark indent %d, want ~%d (centered)", indent, want)
+	}
+
+	// A full-width section rule shows where the column sits: it must be inset on
+	// the left and stop short of the right edge by about as much.
+	var rule string
+	for _, l := range lines {
+		if strings.Contains(l, "Overdue (") {
+			rule = l
+		}
+	}
+	if rule == "" {
+		t.Fatal("no Overdue section header in the view")
+	}
+	left := leadingSpacesTest(rule)
+	right := m.width - lipgloss.Width(strings.TrimRight(rule, " "))
+	if left < 4 {
+		t.Errorf("agenda column not indented (left margin %d)", left)
+	}
+	if diff := left - right; diff > 4 || diff < -4 {
+		t.Errorf("agenda column off-center: left margin %d, right margin %d", left, right)
+	}
+}
+
+func leadingSpacesTest(s string) int { return len(s) - len(strings.TrimLeft(s, " ")) }
+
+// stripEraseTest removes the trailing erase-to-end-of-line sequences the view
+// appends, which stripAnsiTest (which scans to the next "m") cannot handle.
+func stripEraseTest(s string) string { return strings.ReplaceAll(s, "\x1b[K", "") }
+
 func countLinesTest(s string) int { return len(strings.Split(strings.TrimRight(s, "\n"), "\n")) }

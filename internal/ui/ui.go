@@ -412,6 +412,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - 10
 		m.width = msg.Width
 		m.height = msg.Height
+		// The agenda's rows and rules are laid out against the terminal width when
+		// the report is built, so a resize has to rebuild it — otherwise the first
+		// window size after launch leaves stub rules behind.
+		if m.mode == modeReport {
+			status := m.status
+			m.refreshReport()
+			m.status = status
+		}
 	}
 	return m, nil
 }
@@ -697,14 +705,19 @@ func (m Model) View() string {
 	}
 
 	if m.mode == modeReport {
-		footer := m.renderReportFooter()
+		// The agenda is a centered column: header and body are shifted right by a
+		// common indent, and the hint bar is centered in the terminal under them.
+		indent := m.agendaIndent()
+		// Center against width-2 so the centered hint bar stays inside the
+		// anti-wrap gutter instead of being clipped on the right.
+		footer := centerBlock(m.renderReportFooter(), m.width-2)
 		if m.height <= 0 {
-			return m.fillView(m.renderReportHeader() + m.report + "\n" + footer)
+			return m.fillView(indentBlock(m.renderReportHeader()+m.report, indent) + "\n" + footer)
 		}
 		// Assemble as explicit lines and pad before the footer so the "Press …"
 		// hint stays pinned to the bottom (just above the status bar) regardless of
 		// how short the agenda is.
-		headerLines := strings.Split(strings.TrimRight(m.renderReportHeader(), "\n"), "\n")
+		headerLines := strings.Split(strings.TrimRight(indentBlock(m.renderReportHeader(), indent), "\n"), "\n")
 		footerLines := strings.Split(footer, "\n")
 		target := m.height - 1 // rows above the status bar
 		bodyMax := target - len(headerLines) - len(footerLines) - 1
@@ -713,7 +726,7 @@ func (m Model) View() string {
 		}
 		out := make([]string, 0, target)
 		out = append(out, headerLines...)
-		out = append(out, strings.Split(m.renderReportWithHeight(bodyMax), "\n")...)
+		out = append(out, strings.Split(indentBlock(m.renderReportWithHeight(bodyMax), indent), "\n")...)
 		for len(out) < target-len(footerLines) {
 			out = append(out, "")
 		}

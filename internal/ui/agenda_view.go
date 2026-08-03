@@ -80,14 +80,16 @@ func (m *Model) refreshReport() {
 	m.reportCursor = clampCursor(m.reportCursor, totalReportTasks)
 	m.reportTaskIDs = nil
 
-	// Title column scales with the terminal; the rest of the line (gutter, id,
-	// priority flag, project/stage meta, and trailing date) is ~64 cells. "∙" is
-	// one cell even in CJK/Termius, unlike "•".
+	// Everything is drawn into a fixed column that the view then centers, so the
+	// title scales with that column rather than the raw terminal width. The rest
+	// of the line (gutter, id, priority flag, project/stage meta, and trailing
+	// date) is ~64 cells. "∙" is one cell even in CJK/Termius, unlike "•".
+	colW := m.agendaWidth()
 	metaW := 16
-	titleW := clampInt(m.width-64, 14, 44)
+	titleW := clampInt(colW-64, 14, 44)
 	var b strings.Builder
 	writeDivider := func() {
-		b.WriteString(m.styles.Border.Render(m.ruleLine(m.width)))
+		b.WriteString(m.styles.Border.Render(m.ruleLine(colW)))
 		b.WriteString("\n")
 	}
 	// Section headers read as an iconned label followed by a count badge and a
@@ -97,7 +99,7 @@ func (m *Model) refreshReport() {
 	writeSectionHeader := func(icon, title string, count int, style lipgloss.Style) {
 		headText := fmt.Sprintf("  %s  %s (%d)", icon, title, count)
 		head := style.Bold(true).Render(headText)
-		ruleW := m.width - lipgloss.Width(head) - 1
+		ruleW := colW - lipgloss.Width(head) - 1
 		if ruleW < 1 {
 			ruleW = 1
 		}
@@ -320,16 +322,108 @@ func recentlyDoneFrom(tasks []storage.Task, limit int) []storage.Task {
 	return done
 }
 
+// agendaWidth is the width of the column the agenda is drawn into. The launch
+// screen reads as a centered card (the gorae / meari style) rather than a
+// full-bleed list, so the rules and rows stop short of the terminal edges on
+// wide windows.
+func (m Model) agendaWidth() int {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	// Two cells of margin each side: the same anti-wrap gutter every other view
+	// keeps, so a centered rule never gets clipped at the right edge.
+	return clampInt(w-4, 32, 100)
+}
+
+// agendaIndent is the left pad that centers the agenda column in the terminal.
+// It is applied when the view is assembled rather than baked into the rows, so
+// a resize re-centers without rebuilding the report.
+func (m Model) agendaIndent() int {
+	if m.width <= 0 {
+		return 0
+	}
+	pad := (m.width - m.agendaWidth()) / 2
+	if pad < 0 {
+		return 0
+	}
+	return pad
+}
+
+// centerBlock centers a block of lines inside width while preserving the
+// block's own left alignment: every line shifts right by one common indent
+// instead of being centered individually, which would stagger the wordmark's
+// glyph rows and the lesson's gutter bar.
+func centerBlock(block string, width int) string {
+	lines := strings.Split(block, "\n")
+	blockW := 0
+	for _, ln := range lines {
+		if w := lipgloss.Width(ln); w > blockW {
+			blockW = w
+		}
+	}
+	pad := (width - blockW) / 2
+	if pad <= 0 {
+		return block
+	}
+	indent := strings.Repeat(" ", pad)
+	for i, ln := range lines {
+		lines[i] = indent + ln
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indentBlock shifts every non-empty line of a block right by n cells. Blank
+// lines are left blank so callers can still trim them off the ends.
+func indentBlock(block string, n int) string {
+	if n <= 0 {
+		return block
+	}
+	indent := strings.Repeat(" ", n)
+	lines := strings.Split(block, "\n")
+	for i, ln := range lines {
+		if ln == "" {
+			continue
+		}
+		lines[i] = indent + ln
+	}
+	return strings.Join(lines, "\n")
+}
+
+// agendaTopPad is the breathing room above the wordmark. It is part of the
+// header so the body-height and scroll math account for it, and it shrinks on
+// short terminals — and disappears when the header is folded — so the agenda
+// never trades rows it needs for whitespace.
+func (m Model) agendaTopPad() int {
+	if m.agendaHeaderFold {
+		return 0
+	}
+	switch {
+	case m.height <= 0:
+		return 1 // size not known yet; keep it modest
+	case m.height < 20:
+		return 0
+	case m.height < 28:
+		return 1
+	default:
+		return 2
+	}
+}
+
 func (m Model) renderReportHeader() string {
 	now := time.Now()
+	colW := m.agendaWidth()
 	var b strings.Builder
+	b.WriteString(strings.Repeat("\n", m.agendaTopPad()))
+	// Wordmark, greeting, lesson and summary are centered over the agenda column;
+	// the sections below stay left-aligned inside it because they are tabular.
 	if !m.agendaHeaderFold {
-		b.WriteString(m.renderListBanner())
+		b.WriteString(centerBlock(m.renderListBanner(), colW))
 		b.WriteString("\n\n")
 	}
 
 	// Greeting line, with the scoped project and a completion streak appended.
-	greeting := fmt.Sprintf("  %s, it's %s", greetingForTime(now), now.Format("Monday, Jan 2"))
+	greeting := fmt.Sprintf("%s, it's %s", greetingForTime(now), now.Format("Monday, Jan 2"))
 	line := m.styles.Heading.Render(greeting)
 	if scope := m.scopedTopicName(); scope != "" {
 		line += m.styles.Muted.Render("   ·   ") + m.styles.Accent.Render("Agenda · "+scope)
@@ -337,20 +431,20 @@ func (m Model) renderReportHeader() string {
 	if streak := m.completionStreak(); streak > 1 {
 		line += m.styles.Muted.Render("   ·   ") + m.styles.Warning.Render(fmt.Sprintf("🔥 %d-day streak", streak))
 	}
-	b.WriteString(line)
+	b.WriteString(centerBlock(line, colW))
 	b.WriteString("\n")
 
 	// The lesson sits just under the greeting, with a blank line separating it
 	// from the triage summary below.
 	if !m.agendaHeaderFold {
-		b.WriteString(m.renderAgendaFortune(now))
+		b.WriteString(centerBlock(m.renderAgendaFortune(now), colW))
 		b.WriteString("\n\n")
 	}
 
 	// At-a-glance triage summary + 7-day sparkline.
-	b.WriteString(m.renderAgendaSummary())
+	b.WriteString(centerBlock(m.renderAgendaSummary(), colW))
 	b.WriteString("\n")
-	b.WriteString(m.renderAgendaWeek(now))
+	b.WriteString(centerBlock(m.renderAgendaWeek(now), colW))
 	b.WriteString("\n\n")
 	return b.String()
 }
@@ -374,7 +468,7 @@ func (m Model) renderAgendaSummary() string {
 	if doneToday > 0 {
 		parts = append(parts, m.styles.Success.Render(fmt.Sprintf("✓ %d done today", doneToday)))
 	}
-	return "  " + strings.Join(parts, m.styles.Muted.Render("   ∙   "))
+	return strings.Join(parts, m.styles.Muted.Render("   ∙   "))
 }
 
 // agendaCounts tallies the scoped tasks for the summary strip.
@@ -434,7 +528,7 @@ func (m Model) renderAgendaWeek(now time.Time) string {
 	}
 	bars := []rune("▁▂▃▄▅▆▇█")
 	var b strings.Builder
-	b.WriteString(m.styles.Muted.Render("  Next 7 days "))
+	b.WriteString(m.styles.Muted.Render("Next 7 days "))
 	for i := 0; i < 7; i++ {
 		day := start.AddDate(0, 0, i)
 		label := day.Format("Mon")[:1]
@@ -483,15 +577,15 @@ func (m Model) completionStreak() int {
 // renderAgendaFortune shows just the day's lesson — no label, no header — as a
 // clear (normal-foreground) italic line with a subtle accent gutter.
 func (m Model) renderAgendaFortune(now time.Time) string {
-	inner := m.panelInnerWidth()
-	wrapW := inner - 6
+	colW := m.agendaWidth()
+	wrapW := colW - 6
 	if wrapW < 24 {
-		wrapW = inner
+		wrapW = colW
 	}
 	style := lipgloss.NewStyle().Italic(true)
 	var lines []string
 	for _, line := range strings.Split(wrapText(ichingDailyLesson(dailyIChingFortune(now)), wrapW), "\n") {
-		lines = append(lines, m.styles.Accent.Render("  ▌ ")+style.Render(line))
+		lines = append(lines, m.styles.Accent.Render("▌ ")+style.Render(line))
 	}
 	return strings.Join(lines, "\n")
 }
