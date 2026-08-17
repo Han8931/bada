@@ -11,6 +11,12 @@
 Bada keeps your tasks local while giving you the planning tools of a larger
 project manager—without leaving the terminal.
 
+## Demo
+
+<p align="center">
+  <img src="assets/bada_demo.gif" alt="Bada demo" width="900">
+</p>
+
 ## Highlights
 
 - **Fast keyboard workflow** — capture, edit, search, filter, sort, and complete
