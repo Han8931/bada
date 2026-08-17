@@ -41,12 +41,14 @@ if [[ -z "${PREFIX}" ]]; then
 fi
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/bada"
-CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/bada"
+# The DB and trash live in the data dir, not the cache dir: cache directories
+# are fair game for cleanup tools.
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/bada"
 CONFIG_PATH="${CONFIG_DIR}/config.toml"
-DB_PATH="${CACHE_DIR}/bada.db"
-TRASH_DIR="${CACHE_DIR}/trash"
+DB_PATH="${DATA_DIR}/bada.db"
+TRASH_DIR="${DATA_DIR}/trash"
 
-mkdir -p "${CONFIG_DIR}" "${CACHE_DIR}"
+mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   tmpfile="$(mktemp)"
