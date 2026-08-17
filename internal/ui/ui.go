@@ -11,6 +11,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"bada/internal/config"
+	"bada/internal/git"
 	"bada/internal/storage"
 )
 
@@ -35,6 +36,7 @@ const (
 	modeDashboard
 	modeWorkflow
 	modeBoard
+	modeGitLog
 )
 
 type noteKind int
@@ -266,10 +268,12 @@ type Model struct {
 	workflowEdit      *workflowEditState
 	dashboardCursor   int
 	dashboardScroll   int
-	dashEditing       string // "", "desc", or "target": which topic-meta field is being typed
-	boardTopic        string // project shown in the kanban board
+	dashEditing       string         // "", "desc", or "target": which topic-meta field is being typed
+	dashComplete      []git.DirMatch // directory candidates from the last Tab on the repo prompt
+	boardTopic        string         // project shown in the kanban board
 	boardCol          int
 	boardRow          int
+	gitLog            *gitLogState // commit log for a project's linked repo
 	undo              *undoEntry
 	agendaHeaderFold  bool // hide the banner + I Ching reading to give the agenda body more room
 }
@@ -352,6 +356,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleNoteEdited(msg)
 	case configEditedMsg:
 		return m.handleConfigEdited(msg)
+	case gitLogLoadedMsg:
+		return m.handleGitLogLoaded(msg)
+	case gitCommitLoadedMsg:
+		return m.handleGitCommitLoaded(msg)
 	case tea.KeyMsg:
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
@@ -385,6 +393,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeBoard {
 			return m.updateBoardMode(msg.String())
+		}
+		if m.mode == modeGitLog {
+			return m.updateGitLogMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -782,6 +793,11 @@ func (m Model) View() string {
 		return m.fillView(b.String())
 	}
 
+	if m.mode == modeGitLog {
+		b.WriteString(m.renderGitLogView())
+		return m.fillView(b.String())
+	}
+
 	footer := strings.TrimRight(m.renderFooterPanel(), "\n")
 	showHints := m.mode == modeList && m.meta == nil
 	hints := ""
@@ -1162,9 +1178,15 @@ func (m Model) updateDeleteTopicConfirm(key string) (tea.Model, tea.Cmd) {
 		}
 		var errReload error
 		m.tasks, errReload = m.store.FetchTasks()
+		// DeleteTopic drops the topic_notes row too, so refresh the metadata map
+		// or the project would linger in views that list registered projects.
+		if tm, err := m.store.AllTopicMeta(); err == nil {
+			m.topicMeta = tm
+		}
 		if errReload == nil {
 			m.sortTasks()
 			m.cursor = clampCursor(0, len(m.visibleItems()))
+			m.dashboardCursor = clampCursor(m.dashboardCursor, len(m.sortedTopics()))
 			m.status = fmt.Sprintf("Removed topic \"%s\" from %d task(s)", m.pendingTopic, n)
 		} else {
 			m.status = fmt.Sprintf("reload failed: %v", errReload)

@@ -103,7 +103,28 @@ Quick filter commands:
 Topics double as **projects**. Open the **projects overview** with `:projects`
 (aliases `:topics`, and `:dashboard` for muscle memory) to manage them:
 
+- **Create a project** with `n` (or `:project new <name>`). A project normally
+  comes into being the moment you tag a task with it, but this registers one
+  up front — useful when you want the project, its repo, and its workflow set
+  up before filing any work under it. Empty projects show in the overview with
+  a `0/0` bar.
 - **Scope** to a project with `Enter` (filters the task list to that topic).
+- **Delete a project** with `D` (confirms first). Its tasks are kept — they just
+  lose the topic.
+- **Link a git repo** with `g`: point the project at a local repository path
+  (`~` is expanded). `Tab` completes the path against the filesystem — it fills
+  in the unambiguous part and lists the matching directories underneath the
+  prompt, marking the ones that are already git repositories with `●`, so you
+  can find the directory without leaving bada. Tab again to descend into a
+  completed directory. bada validates the path and stores the repository's top
+  level, so pointing at any subdirectory works. Press `g` and submit an empty
+  value to unlink. The linked repo shows in the project's detail panel.
+- **Browse its commits** with `L`, or `:gitlog` (`:gitlog <project>` picks one
+  explicitly; with no argument it uses the scoped project). The log lists each
+  commit's short sha, date, author, and subject. `j`/`k` move, `Enter` opens
+  `git show --stat` for the selected commit, `r` refreshes, and `m` loads
+  another 100 commits. History is read in the background, so a large repository
+  never blocks the UI. bada only ever *reads* your repository.
 - **Custom status workflow** with `w`: define an ordered pipeline of stages, e.g.
   a thesis project with `writing → review → submission → rebuttal`. In the editor:
   `a` add, `e` rename, `c` cycle a stage's category, `J`/`K` reorder, `D` delete,

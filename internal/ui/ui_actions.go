@@ -2850,6 +2850,26 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			m.input.Blur()
 			return m.applyThemeCommand(strings.TrimSpace(strings.TrimPrefix(cmdLower, "theme")))
 		}
+		// ":project new <name>" registers a project with no tasks yet; bare
+		// ":project" opens the overview. The argument is sliced off the raw
+		// command, not the lowercased one, so the name keeps its capitalization.
+		if cmdLower == "project" || strings.HasPrefix(cmdLower, "project ") {
+			raw := strings.TrimPrefix(cmd, ":")
+			arg := strings.TrimSpace(raw[len("project"):])
+			m.mode = modeList
+			m.input.Blur()
+			return m.runProjectCommand(arg)
+		}
+		// ":gitlog" takes an optional project argument, defaulting to whichever
+		// project is currently scoped. Sliced off the raw command so the project
+		// name keeps its capitalization.
+		if cmdLower == "gitlog" || strings.HasPrefix(cmdLower, "gitlog ") {
+			raw := strings.TrimPrefix(cmd, ":")
+			arg := strings.TrimSpace(raw[len("gitlog"):])
+			m.mode = modeList
+			m.input.Blur()
+			return m.enterGitLogView(arg, modeList)
+		}
 		// The stage board takes an optional project argument. ":board" is a
 		// legacy alias for ":kanban".
 		for _, pfx := range []string{"kanban", "board"} {
@@ -2952,7 +2972,7 @@ func completeCommand(input string) string {
 		}
 		return prefix + "theme " + names[0]
 	}
-	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "help", "in-progress", "kanban", "overdue", "pending", "projects", "quit", "stage", "stats", "theme", "today", "week"}
+	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "gitlog", "help", "in-progress", "kanban", "overdue", "pending", "project", "projects", "quit", "stage", "stats", "theme", "today", "week"}
 	if cmd == "" {
 		return prefix + commands[0]
 	}
@@ -4743,6 +4763,10 @@ func (m Model) topicStageStats(topic string) []stageCount {
 	return counts
 }
 
+// sortedTopics lists every known project: those implied by the tasks tagged
+// with them, plus those registered on their own (a topic_notes row with no tasks
+// yet), so a freshly created project is visible before any work is filed under
+// it.
 func (m Model) sortedTopics() []string {
 	set := map[string]struct{}{}
 	for _, t := range m.tasks {
@@ -4750,6 +4774,11 @@ func (m Model) sortedTopics() []string {
 			continue
 		}
 		for _, topic := range uniqueTopics(t.Topics) {
+			set[topic] = struct{}{}
+		}
+	}
+	for topic := range m.topicMeta {
+		if topic = strings.TrimSpace(topic); topic != "" {
 			set[topic] = struct{}{}
 		}
 	}
