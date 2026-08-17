@@ -1,13 +1,22 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
+	"bada/internal/git"
 	"bada/internal/storage"
 )
+
+// gitTimeout bounds every git invocation so a slow, huge, or network-backed
+// repository can't wedge the UI.
+const gitTimeout = 5 * time.Second
 
 // ---------------------------------------------------------------------------
 // Project dashboard (modeDashboard)
@@ -67,6 +76,22 @@ func (m Model) updateDashboardMode(key string, msg tea.KeyMsg) (tea.Model, tea.C
 		return m.startDashboardEdit("desc")
 	case "t":
 		return m.startDashboardEdit("target")
+	case "n":
+		return m.startDashboardEdit("new")
+	case "g":
+		return m.startDashboardEdit("repo")
+	case "L":
+		if topic, ok := m.dashboardCurrentTopic(); ok {
+			return m.enterGitLogView(topic, modeDashboard)
+		}
+		return m, nil
+	case m.cfg.Keys.Delete, "D":
+		if topic, ok := m.dashboardCurrentTopic(); ok {
+			m.pendingTopic = topic
+			m.confirmTopic = true
+			m.status = fmt.Sprintf("Delete project %q? Its tasks are kept but untagged. (y/n)", topic)
+		}
+		return m, nil
 	default:
 		return m, nil
 	}
@@ -96,12 +121,22 @@ func (m Model) toggleDashboardArchived() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startDashboardEdit(field string) (tea.Model, tea.Cmd) {
+	// Creating a project is the one edit that doesn't need a row under the
+	// cursor — it's how the first project gets made.
+	if field == "new" {
+		m.dashEditing = field
+		m.input.SetValue("")
+		m.input.Focus()
+		m.status = "New project name (enter to create, esc to cancel)"
+		return m, nil
+	}
 	topic, ok := m.dashboardCurrentTopic()
 	if !ok {
 		return m, nil
 	}
 	meta := m.topicMeta[topic]
 	m.dashEditing = field
+	m.dashComplete = nil
 	switch field {
 	case "desc":
 		m.input.SetValue(meta.Description)
@@ -113,6 +148,9 @@ func (m Model) startDashboardEdit(field string) (tea.Model, tea.Cmd) {
 			m.input.SetValue("")
 		}
 		m.status = "Target date YYYY-MM-DD for " + topic + " (blank to clear)"
+	case "repo":
+		m.input.SetValue(meta.RepoPath)
+		m.status = "Git repo path for " + topic + " (tab to complete, blank to clear)"
 	}
 	m.input.Focus()
 	return m, nil
@@ -120,6 +158,25 @@ func (m Model) startDashboardEdit(field string) (tea.Model, tea.Cmd) {
 
 func (m Model) updateDashboardEditing(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
+	case "tab":
+		// Only the repo prompt names something on disk, so it's the only field
+		// with anything to complete against.
+		if m.dashEditing != "repo" {
+			return m, nil
+		}
+		completed, matches := git.CompleteDir(m.input.Value())
+		m.input.SetValue(completed)
+		m.input.CursorEnd()
+		m.dashComplete = matches
+		switch {
+		case len(matches) == 0:
+			m.status = "No matching directory"
+		case len(matches) == 1:
+			m.status = "tab again to go deeper · ⏎ to link"
+		default:
+			m.status = fmt.Sprintf("%d matches · tab to extend · ⏎ to link", len(matches))
+		}
+		return m, nil
 	case "esc":
 		m.dashEditing = ""
 		m.input.SetValue("")
@@ -127,13 +184,19 @@ func (m Model) updateDashboardEditing(key string, msg tea.KeyMsg) (tea.Model, te
 		m.status = "Cancelled"
 		return m, nil
 	case "enter":
+		val := strings.TrimSpace(m.input.Value())
+		switch m.dashEditing {
+		case "new":
+			return m.finishCreateProject(val)
+		case "repo":
+			return m.finishSetProjectRepo(val)
+		}
 		topic, ok := m.dashboardCurrentTopic()
 		if !ok {
 			m.dashEditing = ""
 			return m, nil
 		}
 		meta := m.topicMeta[topic]
-		val := strings.TrimSpace(m.input.Value())
 		desc := meta.Description
 		target := meta.TargetDate
 		switch m.dashEditing {
@@ -160,9 +223,130 @@ func (m Model) updateDashboardEditing(key string, msg tea.KeyMsg) (tea.Model, te
 		m.status = "Saved"
 		return m, nil
 	default:
+		// Any edit invalidates the listed candidates.
+		m.dashComplete = nil
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+	}
+}
+
+// finishCreateProject registers a project by name and parks the cursor on it.
+func (m Model) finishCreateProject(name string) (tea.Model, tea.Cmd) {
+	if name == "" {
+		m.status = "Project name cannot be empty"
+		return m, nil
+	}
+	// Topics are comma-separated on tasks, so a name containing one could never
+	// be selected again as a single project.
+	if strings.Contains(name, ",") {
+		m.status = "Project name cannot contain a comma"
+		return m, nil
+	}
+	existing := false
+	for _, t := range m.sortedTopics() {
+		if strings.EqualFold(t, name) {
+			existing = true
+			name = t
+			break
+		}
+	}
+	if !existing {
+		if err := m.store.CreateTopic(name); err != nil {
+			m.status = fmt.Sprintf("create failed: %v", err)
+			return m, nil
+		}
+	}
+	m.refreshTopicMeta()
+	m.finishDashboardEdit()
+	for i, t := range m.sortedTopics() {
+		if t == name {
+			m.dashboardCursor = i
+			break
+		}
+	}
+	if existing {
+		m.status = "Project " + name + " already exists"
+	} else {
+		m.status = "Created project " + name
+	}
+	return m, nil
+}
+
+// finishSetProjectRepo points the selected project at a local git repository.
+// The path is resolved to the repo's top level so later log calls don't depend
+// on which subdirectory was typed.
+func (m Model) finishSetProjectRepo(path string) (tea.Model, tea.Cmd) {
+	topic, ok := m.dashboardCurrentTopic()
+	if !ok {
+		m.finishDashboardEdit()
+		return m, nil
+	}
+	resolved := ""
+	if path != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+		defer cancel()
+		top, err := git.Resolve(ctx, path)
+		if err != nil {
+			// Keep the prompt open so the path can be corrected in place.
+			m.status = fmt.Sprintf("%v", err)
+			return m, nil
+		}
+		resolved = top
+	}
+	if err := m.store.SetTopicRepo(topic, resolved); err != nil {
+		m.status = fmt.Sprintf("save failed: %v", err)
+		return m, nil
+	}
+	m.refreshTopicMeta()
+	m.finishDashboardEdit()
+	if resolved == "" {
+		m.status = "Cleared repo for " + topic
+	} else {
+		m.status = topic + " → " + resolved
+	}
+	return m, nil
+}
+
+// runProjectCommand backs ":project". With no argument it opens the overview;
+// "new <name>" (or "add <name>") registers a project that has no tasks yet.
+func (m Model) runProjectCommand(arg string) (tea.Model, tea.Cmd) {
+	if arg == "" {
+		return m.enterDashboardView()
+	}
+	verb, rest, _ := strings.Cut(arg, " ")
+	switch strings.ToLower(verb) {
+	case "new", "add":
+		name := strings.TrimSpace(rest)
+		if name == "" {
+			m.status = "Usage: :project new <name>"
+			return m, nil
+		}
+		dash, _ := m.enterDashboardView()
+		next, ok := dash.(Model)
+		if !ok {
+			return dash, nil
+		}
+		return next.finishCreateProject(name)
+	default:
+		m.status = fmt.Sprintf("unknown :project subcommand %q (try: new)", verb)
+		return m, nil
+	}
+}
+
+// finishDashboardEdit closes the inline metadata prompt.
+func (m *Model) finishDashboardEdit() {
+	m.dashEditing = ""
+	m.dashComplete = nil
+	m.input.SetValue("")
+	m.input.Blur()
+}
+
+// refreshTopicMeta reloads project metadata after a write. A failure here only
+// means the view is momentarily stale, so it's deliberately not surfaced.
+func (m *Model) refreshTopicMeta() {
+	if tm, err := m.store.AllTopicMeta(); err == nil {
+		m.topicMeta = tm
 	}
 }
 
@@ -179,21 +363,32 @@ func (m Model) dashboardFooter() string {
 			{"esc", "cancel"},
 		})
 	}
+	// Two rows: the full set no longer fits on one line at a typical width, and
+	// hintBar clips rather than wraps.
 	return m.hintBar([]keyHint{
 		{m.cfg.Keys.Up + "/" + m.cfg.Keys.Down, "move"},
 		{"enter", "scope"},
+		{"n", "new"},
 		{"w", "workflow"},
+		{"L", "git log"},
+		{m.cfg.Keys.Cancel, "close"},
+	}) + "\n" + m.hintBar([]keyHint{
 		{"e", "desc"},
 		{"t", "target"},
+		{"g", "repo"},
 		{"a", "archive"},
-		{m.cfg.Keys.Cancel, "close"},
+		{"D", "delete"},
 	})
 }
 
 func (m Model) dashboardContent() string {
 	topics := m.sortedTopics()
 	if len(topics) == 0 {
-		return m.styles.Muted.Render("  No topics yet. Add a topic to a task, then define its workflow here.")
+		body := m.styles.Muted.Render("  No projects yet. Press n to create one, or add a topic to a task.")
+		if m.dashEditing != "" {
+			body += "\n\n" + m.dashboardPrompt()
+		}
+		return body
 	}
 	stats := m.topicStats()
 	var b strings.Builder
@@ -231,6 +426,80 @@ func (m Model) dashboardContent() string {
 		b.WriteString("\n")
 		b.WriteString(m.dashboardDetail(topic))
 	}
+	if m.dashEditing != "" {
+		b.WriteString("\n")
+		b.WriteString(m.dashboardPrompt())
+	}
+	return b.String()
+}
+
+// dashboardPrompt renders the inline editor for whichever project field is
+// being typed, so the text being entered is visible in the panel itself.
+func (m Model) dashboardPrompt() string {
+	var label string
+	switch m.dashEditing {
+	case "new":
+		label = "New project"
+	case "desc":
+		label = "Description"
+	case "target":
+		label = "Target date"
+	case "repo":
+		label = "Git repo"
+	default:
+		return ""
+	}
+	line := "  " + m.styles.Accent.Render(label+": ") + m.input.View()
+	if len(m.dashComplete) < 2 {
+		// A lone candidate is already written into the field; listing it again
+		// would just be noise.
+		return line
+	}
+	return line + "\n" + m.dashCompletionList()
+}
+
+// dashCompletionList renders the directories Tab matched, wrapped to the panel
+// width. Directories that are already git repositories are marked, so the one
+// worth linking stands out from its neighbours.
+func (m Model) dashCompletionList() string {
+	const maxShown = 24
+	shown := m.dashComplete
+	hidden := 0
+	if len(shown) > maxShown {
+		hidden = len(shown) - maxShown
+		shown = shown[:maxShown]
+	}
+	// Leave room for the two-space indent and the panel's own frame.
+	width := m.width - 6
+	if width < 20 {
+		width = 20
+	}
+	var b strings.Builder
+	b.WriteString("  ")
+	col := 0
+	for i, d := range shown {
+		name := d.Name + "/"
+		cell := name
+		if d.IsRepo {
+			cell = name + " ●"
+		}
+		if col > 0 && col+runewidth.StringWidth(cell)+2 > width {
+			b.WriteString("\n  ")
+			col = 0
+		} else if i > 0 {
+			b.WriteString("  ")
+			col += 2
+		}
+		if d.IsRepo {
+			b.WriteString(m.styles.Accent.Render(cell))
+		} else {
+			b.WriteString(m.styles.Muted.Render(cell))
+		}
+		col += runewidth.StringWidth(cell)
+	}
+	if hidden > 0 {
+		b.WriteString(m.styles.Muted.Render(fmt.Sprintf("  +%d more", hidden)))
+	}
 	return b.String()
 }
 
@@ -249,6 +518,13 @@ func (m Model) dashboardDetail(topic string) string {
 		target = meta.TargetDate.Time.Format("2006-01-02")
 	}
 	b.WriteString("  " + m.styles.Muted.Render("Target: ") + target + "\n")
+	repo := strings.TrimSpace(meta.RepoPath)
+	if repo == "" {
+		repo = m.styles.Muted.Render("(none — press g to link a git repo)")
+	} else {
+		repo = shortenPath(repo)
+	}
+	b.WriteString("  " + m.styles.Muted.Render("Repo: ") + repo + "\n")
 	stages := m.workflows[topic]
 	if len(stages) == 0 {
 		b.WriteString("  " + m.styles.Muted.Render("Workflow: none — press w to define stages") + "\n")
@@ -512,6 +788,22 @@ func nextStageCategory(cat string) string {
 	default:
 		return storage.StagePending
 	}
+}
+
+// shortenPath re-abbreviates a path under the home directory back to "~/…",
+// which is how the user most likely typed it.
+func shortenPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(path, home+string(os.PathSeparator)); ok {
+		return "~/" + rest
+	}
+	return path
 }
 
 // pctBar renders a fixed-width completion bar (done/total).

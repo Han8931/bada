@@ -52,13 +52,15 @@ type Stage struct {
 }
 
 // TopicMeta holds project-level metadata for a topic (the per-topic notes plus
-// description, an optional target date, and an archived flag).
+// description, an optional target date, an archived flag, and the local git
+// repository the project's work lives in).
 type TopicMeta struct {
 	Topic       string
 	Description string
 	TargetDate  sql.NullTime
 	Archived    bool
 	Notes       string
+	RepoPath    string
 }
 
 // Stage category constants.
@@ -312,6 +314,7 @@ func (s *Store) ensureTopicNoteColumns() error {
 		"description": "ALTER TABLE topic_notes ADD COLUMN description TEXT DEFAULT '';",
 		"target_date": "ALTER TABLE topic_notes ADD COLUMN target_date TEXT DEFAULT NULL;",
 		"archived":    "ALTER TABLE topic_notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;",
+		"repo_path":   "ALTER TABLE topic_notes ADD COLUMN repo_path TEXT NOT NULL DEFAULT '';",
 	}
 	existing := map[string]struct{}{}
 	rows, err := s.db.Query(`PRAGMA table_info(topic_notes);`)
@@ -508,9 +511,9 @@ SELECT ?, position, name, category FROM topic_stages WHERE topic = ?;`, newName,
 	return res.RowsAffected()
 }
 
-// renameTopicMeta carries description/target/archived to the new topic name when
-// the new name has no metadata of its own yet. Notes are handled separately by
-// renameTopicNote (which merges them).
+// renameTopicMeta carries description/target/archived/repo to the new topic name
+// when the new name has no metadata of its own yet. Notes are handled separately
+// by renameTopicNote (which merges them).
 func (s *Store) renameTopicMeta(oldName, newName string) error {
 	oldName = strings.TrimSpace(oldName)
 	newName = strings.TrimSpace(newName)
@@ -521,7 +524,7 @@ func (s *Store) renameTopicMeta(oldName, newName string) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(oldMeta.Description) == "" && !oldMeta.TargetDate.Valid && !oldMeta.Archived {
+	if isBlankTopicMeta(oldMeta) {
 		return nil
 	}
 	newMeta, err := s.TopicMeta(newName)
@@ -529,10 +532,25 @@ func (s *Store) renameTopicMeta(oldName, newName string) error {
 		return err
 	}
 	// Don't clobber metadata the destination topic already has.
-	if strings.TrimSpace(newMeta.Description) == "" && !newMeta.TargetDate.Valid && !newMeta.Archived {
-		return s.UpdateTopicMeta(newName, oldMeta.Description, oldMeta.TargetDate, oldMeta.Archived)
+	if !isBlankTopicMeta(newMeta) {
+		return nil
 	}
-	return nil
+	if err := s.UpdateTopicMeta(newName, oldMeta.Description, oldMeta.TargetDate, oldMeta.Archived); err != nil {
+		return err
+	}
+	if strings.TrimSpace(oldMeta.RepoPath) == "" {
+		return nil
+	}
+	return s.SetTopicRepo(newName, oldMeta.RepoPath)
+}
+
+// isBlankTopicMeta reports whether a topic carries no project metadata worth
+// preserving across a rename (notes are merged separately).
+func isBlankTopicMeta(meta TopicMeta) bool {
+	return strings.TrimSpace(meta.Description) == "" &&
+		!meta.TargetDate.Valid &&
+		!meta.Archived &&
+		strings.TrimSpace(meta.RepoPath) == ""
 }
 
 func (s *Store) DeleteTopic(topic string) (int64, error) {
@@ -771,10 +789,10 @@ func (s *Store) TopicMeta(topic string) (TopicMeta, error) {
 	if topic == "" {
 		return meta, nil
 	}
-	var notes, desc, target sql.NullString
+	var notes, desc, target, repo sql.NullString
 	var archived sql.NullInt64
-	err := s.db.QueryRow(`SELECT notes, description, target_date, archived FROM topic_notes WHERE topic = ?;`, topic).
-		Scan(&notes, &desc, &target, &archived)
+	err := s.db.QueryRow(`SELECT notes, description, target_date, archived, repo_path FROM topic_notes WHERE topic = ?;`, topic).
+		Scan(&notes, &desc, &target, &archived, &repo)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return meta, nil
@@ -784,6 +802,7 @@ func (s *Store) TopicMeta(topic string) (TopicMeta, error) {
 	meta.Notes = notes.String
 	meta.Description = desc.String
 	meta.Archived = archived.Int64 == 1
+	meta.RepoPath = repo.String
 	if target.Valid {
 		if parsed := parseWallTime(target.String); !parsed.IsZero() {
 			meta.TargetDate = sql.NullTime{Time: parsed, Valid: true}
@@ -794,7 +813,7 @@ func (s *Store) TopicMeta(topic string) (TopicMeta, error) {
 
 // AllTopicMeta loads metadata for every topic that has a topic_notes row.
 func (s *Store) AllTopicMeta() (map[string]TopicMeta, error) {
-	rows, err := s.db.Query(`SELECT topic, notes, description, target_date, archived FROM topic_notes;`)
+	rows, err := s.db.Query(`SELECT topic, notes, description, target_date, archived, repo_path FROM topic_notes;`)
 	if err != nil {
 		return nil, err
 	}
@@ -802,12 +821,12 @@ func (s *Store) AllTopicMeta() (map[string]TopicMeta, error) {
 	out := map[string]TopicMeta{}
 	for rows.Next() {
 		var topic string
-		var notes, desc, target sql.NullString
+		var notes, desc, target, repo sql.NullString
 		var archived sql.NullInt64
-		if err := rows.Scan(&topic, &notes, &desc, &target, &archived); err != nil {
+		if err := rows.Scan(&topic, &notes, &desc, &target, &archived, &repo); err != nil {
 			return nil, err
 		}
-		meta := TopicMeta{Topic: topic, Notes: notes.String, Description: desc.String, Archived: archived.Int64 == 1}
+		meta := TopicMeta{Topic: topic, Notes: notes.String, Description: desc.String, Archived: archived.Int64 == 1, RepoPath: repo.String}
 		if target.Valid {
 			if parsed := parseWallTime(target.String); !parsed.IsZero() {
 				meta.TargetDate = sql.NullTime{Time: parsed, Valid: true}
@@ -829,6 +848,33 @@ func (s *Store) UpdateTopicMeta(topic, description string, targetDate sql.NullTi
 	_, err := s.db.Exec(`INSERT INTO topic_notes (topic, notes, description, target_date, archived) VALUES (?, '', ?, ?, ?)
 ON CONFLICT(topic) DO UPDATE SET description = excluded.description, target_date = excluded.target_date, archived = excluded.archived;`,
 		topic, description, target, boolToInt(archived))
+	return err
+}
+
+// CreateTopic registers a project that has no tasks yet by giving it a
+// topic_notes row. Topics are otherwise implied by the tasks tagged with them,
+// so this is what lets a project exist before any work is filed under it.
+// Creating a topic that already exists is a no-op, not an error.
+func (s *Store) CreateTopic(topic string) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic is empty")
+	}
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO topic_notes (topic, notes) VALUES (?, '');`, topic)
+	return err
+}
+
+// SetTopicRepo points a project at a local git repository (or clears it with an
+// empty path). Kept separate from UpdateTopicMeta so callers that only touch the
+// description/target/archived trio don't have to thread a repo path through.
+func (s *Store) SetTopicRepo(topic, repoPath string) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic is empty")
+	}
+	repoPath = strings.TrimSpace(repoPath)
+	_, err := s.db.Exec(`INSERT INTO topic_notes (topic, notes, repo_path) VALUES (?, '', ?)
+ON CONFLICT(topic) DO UPDATE SET repo_path = excluded.repo_path;`, topic, repoPath)
 	return err
 }
 

@@ -1017,6 +1017,8 @@ func (m Model) helpContent() string {
   :gantt     Open gantt timeline
   :stats     Open productivity stats
   :projects  Projects overview (progress, workflows, metadata)
+  :project   :project new <name> creates a project with no tasks yet
+  :gitlog[p] Commit log of the project's linked git repo
   :kanban[t] Stage board for a project's workflow
   :stage <n> Filter list to a workflow stage
   :config    Open the config file in $EDITOR (reloads on save)
@@ -1026,7 +1028,9 @@ func (m Model) helpContent() string {
 
 Projects (:projects):
   enter  Scope to project   w  Edit status workflow
-  e desc · t target · a archive   The 1st topic on a task is its project.
+  n new · e desc · t target · g git repo · L git log · a archive · D delete
+  The 1st topic on a task is its project.
+  Git log (:gitlog or L): j/k commit · enter show · r refresh · m more · esc close
   Workflow editor: a add · e rename · c category · J/K reorder · D delete
   Kanban (:kanban): h/l column · j/k task · enter detail · L/H advance/send back · esc close
 
