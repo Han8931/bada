@@ -11,11 +11,20 @@
 Bada keeps your tasks local while giving you the planning tools of a larger
 project manager—without leaving the terminal.
 
-## Demo
-
 <p align="center">
   <img src="assets/bada_demo.gif" alt="Bada demo" width="900">
 </p>
+
+## Why a Terminal Todo App?
+
+A TUI todo app is the best place to keep your work because it keeps you away from
+what everything else is built for: ads, feeds, notifications, and social media
+designed to pull your attention. 
+
+**Bada has one focus—real productivity**. Capture
+your tasks, manage your schedule, and get on with the work, with none of the
+noise.
+
 
 ## Highlights
 
