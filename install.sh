@@ -55,6 +55,23 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
       "${ROOT_DIR}/config.example.toml" > "${tmpfile}"
   mv "${tmpfile}" "${CONFIG_PATH}"
   echo "Wrote default config to ${CONFIG_PATH}"
+else
+  # An existing config is never rewritten — it holds the user's own settings.
+  # But that means sections added by newer releases (e.g. [llm]) are invisible
+  # to anyone who installed earlier, so point them out instead of staying quiet.
+  missing=()
+  while read -r section; do
+    if ! grep -q "^\s*\[${section}\]" "${CONFIG_PATH}"; then
+      missing+=("[${section}]")
+    fi
+  done < <(grep -o '^\[[a-z_.]*\]' "${ROOT_DIR}/config.example.toml" | tr -d '[]')
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo
+    echo "NOTE: ${CONFIG_PATH} predates some settings: ${missing[*]}"
+    echo "      Your config is left untouched. To add them, run ':llm init' in"
+    echo "      bada, or copy the sections from:"
+    echo "          ${ROOT_DIR}/config.example.toml"
+  fi
 fi
 
 BIN_DIR="${PREFIX}/bin"

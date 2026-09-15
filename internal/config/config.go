@@ -84,6 +84,8 @@ type Config struct {
 	Theme         Theme     `toml:"theme"`
 	Agenda        Agenda    `toml:"agenda"`
 	Holidays      []Holiday `toml:"holidays"`
+	LLM           LLM       `toml:"llm"`
+	Report        Report    `toml:"report"`
 }
 
 func LoadOrCreate(path string) (Config, error) {
@@ -391,6 +393,14 @@ func defaultConfig() Config {
 		},
 		Agenda: Agenda{
 			UpcomingDays: 3,
+		},
+		// Disabled until the user names a provider; the section is still
+		// written out so the settings are discoverable in a fresh config.
+		LLM: LLM{
+			TimeoutSeconds: defaultLLMTimeout,
+		},
+		Report: Report{
+			DefaultPeriod: DefaultReportPeriod,
 		},
 		Theme: Theme{
 			Preset:      "light",

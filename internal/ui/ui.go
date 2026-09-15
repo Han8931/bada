@@ -37,6 +37,7 @@ const (
 	modeWorkflow
 	modeBoard
 	modeGitLog
+	modeProjectReport
 )
 
 type noteKind int
@@ -273,7 +274,8 @@ type Model struct {
 	boardTopic        string         // project shown in the kanban board
 	boardCol          int
 	boardRow          int
-	gitLog            *gitLogState // commit log for a project's linked repo
+	gitLog            *gitLogState        // commit log for a project's linked repo
+	projectReport     *projectReportState // LLM-written report for one project
 	undo              *undoEntry
 	agendaHeaderFold  bool // hide the banner + I Ching reading to give the agenda body more room
 }
@@ -360,6 +362,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleGitLogLoaded(msg)
 	case gitCommitLoadedMsg:
 		return m.handleGitCommitLoaded(msg)
+	case llmPingMsg:
+		return m.handleLLMPing(msg)
+	case projectReportMsg:
+		return m.handleProjectReport(msg)
 	case tea.KeyMsg:
 		if m.meta != nil {
 			return m.updateMetadataMode(msg.String(), msg)
@@ -396,6 +402,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeGitLog {
 			return m.updateGitLogMode(msg.String())
+		}
+		if m.mode == modeProjectReport {
+			return m.updateProjectReportMode(msg.String())
 		}
 		if m.mode == modeReport {
 			return m.updateReportMode(msg.String(), msg)
@@ -795,6 +804,11 @@ func (m Model) View() string {
 
 	if m.mode == modeGitLog {
 		b.WriteString(m.renderGitLogView())
+		return m.fillView(b.String())
+	}
+
+	if m.mode == modeProjectReport {
+		b.WriteString(m.renderProjectReportView())
 		return m.fillView(b.String())
 	}
 

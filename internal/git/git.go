@@ -72,7 +72,7 @@ func Resolve(ctx context.Context, path string) (string, error) {
 	if path == "" {
 		return "", errors.New("path is empty")
 	}
-	expanded, err := expandHome(path)
+	expanded, err := ExpandHome(path)
 	if err != nil {
 		return "", err
 	}
@@ -108,6 +108,14 @@ func Resolve(ctx context.Context, path string) (string, error) {
 // first. An empty repository (no commits yet) yields an empty slice, not an
 // error.
 func Log(ctx context.Context, repoDir string, limit int) ([]Commit, error) {
+	return LogSince(ctx, repoDir, limit, time.Time{})
+}
+
+// LogSince is Log restricted to commits authored at or after cutoff, which a
+// report over a fixed window needs: filtering a fetched page client-side would
+// silently lose commits whenever the window holds more than limit of them.
+// A zero cutoff means no restriction.
+func LogSince(ctx context.Context, repoDir string, limit int, cutoff time.Time) ([]Commit, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -127,7 +135,13 @@ func Log(ctx context.Context, repoDir string, limit int) ([]Commit, error) {
 		}
 		return nil, nil
 	}
-	out, err := run(ctx, repoDir, "log", fmt.Sprintf("-n%d", limit), "--pretty=format:"+logFormat)
+	args := []string{"log", fmt.Sprintf("-n%d", limit), "--pretty=format:" + logFormat}
+	if !cutoff.IsZero() {
+		// RFC3339 carries the offset, so git reads the cutoff as the same
+		// instant regardless of the repository's or the user's zone.
+		args = append(args, "--since="+cutoff.Format(time.RFC3339))
+	}
+	out, err := run(ctx, repoDir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +184,8 @@ func parseLog(out string) []Commit {
 	return commits
 }
 
-func expandHome(path string) (string, error) {
+// ExpandHome resolves a leading "~" the way the rest of bada does.
+func ExpandHome(path string) (string, error) {
 	if path != "~" && !strings.HasPrefix(path, "~/") {
 		return path, nil
 	}

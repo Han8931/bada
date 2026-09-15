@@ -29,7 +29,7 @@ func CompleteDir(input string) (string, []DirMatch) {
 		return "~/", nil
 	}
 	parent, base := splitDirInput(input)
-	scan, err := expandHome(parent)
+	scan, err := ExpandHome(parent)
 	if err != nil {
 		return input, nil
 	}

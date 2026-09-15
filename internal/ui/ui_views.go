@@ -1023,6 +1023,8 @@ func (m Model) helpContent() string {
   :stage <n> Filter list to a workflow stage
   :config    Open the config file in $EDITOR (reloads on save)
   :theme     List palettes; :theme <name> switches presets
+  :llm       Show the configured LLM; :llm test checks the connection
+  :report    LLM status report from git log + tasks (:report [project] [7d])
   :help / ?  Open this help screen
   :q / :quit Quit bada
 

@@ -2870,6 +2870,25 @@ func (m Model) updateCommandMode(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 			m.input.Blur()
 			return m.enterGitLogView(arg, modeList)
 		}
+		// ":report [project] [period]" writes a status report; ":report prompt"
+		// shows the instructions it would be written with. Sliced off the raw
+		// command so a project name keeps its capitalization.
+		if cmdLower == "report" || strings.HasPrefix(cmdLower, "report ") {
+			raw := strings.TrimPrefix(cmd, ":")
+			arg := strings.TrimSpace(raw[len("report"):])
+			m.mode = modeList
+			m.input.Blur()
+			if strings.EqualFold(arg, "prompt") {
+				return m.showReportPrompt(modeList)
+			}
+			return m.enterProjectReportView(arg, modeList)
+		}
+		// ":llm" reports the configured connection; ":llm test" contacts it.
+		if cmdLower == "llm" || strings.HasPrefix(cmdLower, "llm ") {
+			m.mode = modeList
+			m.input.Blur()
+			return m.runLLMCommand(strings.TrimSpace(strings.TrimPrefix(cmdLower, "llm")))
+		}
 		// The stage board takes an optional project argument. ":board" is a
 		// legacy alias for ":kanban".
 		for _, pfx := range []string{"kanban", "board"} {
@@ -2972,7 +2991,7 @@ func completeCommand(input string) string {
 		}
 		return prefix + "theme " + names[0]
 	}
-	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "gitlog", "help", "in-progress", "kanban", "overdue", "pending", "project", "projects", "quit", "stage", "stats", "theme", "today", "week"}
+	commands := []string{"agenda", "all", "calendar", "config", "done", "gantt", "gitlog", "help", "in-progress", "kanban", "llm", "overdue", "pending", "project", "projects", "quit", "report", "stage", "stats", "theme", "today", "week"}
 	if cmd == "" {
 		return prefix + commands[0]
 	}

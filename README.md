@@ -51,6 +51,8 @@ Open with `:` commands (tab to autocomplete), or the shortcuts noted:
   keybindings, etc.) when you save and quit the editor.
 - `:theme` — list available palettes; `:theme <name>` switches to one
   (`light`, `dark`, `purple`).
+- `:report` — an LLM-written status report for a project, from its git log and
+  its tasks. See **Project reports** below.
 
 Quick filter commands:
 
@@ -191,6 +193,107 @@ legend, and a key-hint footer. Two notable theme keys drive the framing:
 See `config.example.toml` for the full `[theme]` section and explicit palette
 values.
 
+## LLM connection
+
+bada can talk to a chat-completion API. This is the transport layer only — it
+is what the AI features below will be built on — and nothing is contacted
+unless you ask for it.
+
+Three providers are configurable in `[llm]`:
+
+| `provider` | Endpoint | Key |
+| --- | --- | --- |
+| `openai` | `https://api.openai.com/v1/chat/completions` | required |
+| `openai-compatible` | `{base_url}/chat/completions` — LM Studio, vLLM, llama.cpp, OpenRouter, Groq, Ollama's `/v1`, … | optional |
+| `ollama` | `{base_url}/api/chat` (default `http://localhost:11434`) | not used |
+
+```toml
+[llm]
+provider = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"   # or api_key = "env:OPENAI_API_KEY"
+timeout_seconds = 60
+```
+
+A fully local setup needs no key at all:
+
+```toml
+[llm]
+provider = "ollama"
+model = "llama3.2"
+```
+
+- `:llm` reports the current provider, model, endpoint, and whether a key
+  resolved — it never prints the key itself.
+- `:llm init` appends the `[llm]` and `[report]` sections to a config file that
+  predates them. Installing a newer bada never rewrites an existing config, so
+  upgrades do not see new settings otherwise.
+- `:llm test` sends one tiny prompt and reports the model, round-trip time,
+  and reply, or the reason it failed (a bad key, a wrong `base_url`, and an
+  unreachable host each say so specifically).
+
+**Keeping the key out of the config file.** `api_key` accepts `env:NAME` or
+`${NAME}` and resolves it only at request time, so a rewrite of the config
+never copies your key to disk. `api_key_env = "NAME"` does the same thing.
+With `provider = "openai"` and neither set, `$OPENAI_API_KEY` is used.
+
+See `config.example.toml` for `max_tokens`, `temperature` (omitted from the
+request entirely when unset, as reasoning models require), and `[llm.headers]`
+for gateways that need extra HTTP headers.
+
+## Project reports
+
+`:report` writes a status report for one project from two sources bada already
+has: the commit log of its linked git repository, and its tasks. It needs the
+[LLM connection](#llm-connection) above.
+
+```
+:report                 # the scoped project, last 7 days
+:report bada            # a named project
+:report bada 30d        # a different window: 7d, 30d, 2w, 3m, week, month, quarter, year
+:report prompt          # the instructions the report is written with
+```
+
+In the report view: `j`/`k` scroll, `gg`/`G` jump, `s` writes the Markdown file,
+`r` regenerates, `esc` closes.
+
+**What the model is given.** bada assembles the facts itself and asks the model
+only to narrate them — it never counts, and it is told not to invent anything.
+The digest holds the project's description and target date, its workflow
+stages, every commit in the window (date, sha, author, subject), and its tasks
+bucketed into *completed in the period*, *in progress*, *overdue*, *upcoming*,
+and *pending with no due date*. Periods are whole local days, so `7d` means
+today plus the six days before it.
+
+**Saving.** `s` writes `<project>-<date>.md` into `~/.local/share/bada/reports`
+(configurable via `[report].dir`), with a header naming the period and the model.
+A second report for the same project on the same day replaces the first.
+
+### Configuring the prompt
+
+The instructions are fully configurable. Run `:report prompt` to see what is in
+force — that is the text to copy and edit.
+
+```toml
+[report]
+default_period = "7d"
+
+# Nudge the built-in prompt without rewriting it:
+extra_instructions = "한국어로 작성하세요."
+
+# Or replace it entirely:
+# system_prompt = """
+# You write a weekly status update for a non-technical manager.
+# Three sections: Done, Doing, Blocked. No jargon, no commit hashes.
+# """
+
+# Or keep a long prompt in its own file (wins over system_prompt):
+# system_prompt_file = "~/.config/bada/report-prompt.md"
+```
+
+`max_commits` and `max_tasks` (200 each by default) cap how much history goes
+into the prompt, so a busy month cannot overflow the model's context window.
+
 ## Data locations
 
 - Config: `$XDG_CONFIG_HOME/bada/config.toml` (default `~/.config/bada/config.toml`).
@@ -261,6 +364,11 @@ with. To also delete user data (config, DB, and trash):
 * Supabase and create API
 
 ## AI Features
+
+The connection layer is in place — see [LLM connection](#llm-connection) for
+the `[llm]` settings and the `:llm` command — and the first feature on top of
+it, [project reports](#project-reports) from git logs and tasks (`:report`).
+What is still to build:
 
 * **Natural Language Intake:** Convert "Buy milk tomorrow at 5pm" into a structured task with a due date and tags.
 * **Strategic Advisory:** AI analyzes your task list to suggest the most efficient order of operations (e.g., "Group these three errands together to save time").

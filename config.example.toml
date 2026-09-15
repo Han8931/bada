@@ -8,6 +8,117 @@ trash_dir = "trash"
 # How many days ahead :agenda shows in the Upcoming section.
 upcoming_days = 3
 
+[llm]
+# Optional connection to a chat-completion API. bada never contacts it on its
+# own — only when a command asks (start with `:llm test`). Leaving `provider`
+# empty disables the feature entirely.
+#
+# provider  "openai"            — api.openai.com
+#           "openai-compatible" — anything speaking OpenAI's /chat/completions
+#                                 (Ollama's /v1, LM Studio, vLLM, llama.cpp,
+#                                 OpenRouter, Groq, …); base_url is required
+#           "ollama"            — Ollama's native /api/chat, no key needed
+# base_url  Overrides the provider default. As in the OpenAI SDKs, include the
+#           version prefix for the OpenAI wire format: "http://host:1234/v1".
+#           Defaults: https://api.openai.com/v1 · http://localhost:11434
+# model     The model id, e.g. "gpt-4o-mini" or "llama3.2". Required.
+# api_key   The key itself, or an indirection — "env:OPENAI_API_KEY" or
+#           "${OPENAI_API_KEY}" — resolved when a request is made. Prefer an
+#           indirection (or api_key_env): bada rewrites this file on some
+#           upgrades, and an indirection keeps the secret out of it. With
+#           provider = "openai" and neither set, $OPENAI_API_KEY is used.
+# api_key_env  Name of the environment variable holding the key.
+# timeout_seconds  Per-request timeout (default 60, max 600).
+# max_tokens       Caps the reply length. Omit to let the provider decide.
+# temperature      Omit entirely to send no temperature at all, which is what
+#                  reasoning models that reject the parameter require.
+# [llm.headers]    Extra HTTP headers for gateways that need them. They cannot
+#                  override Authorization or Content-Type.
+# Every field is listed blank so the available settings are visible here; an
+# empty provider leaves the feature switched off. `temperature` is deliberately
+# left commented out — unset means "send no temperature at all", which is not
+# the same as 0, and is what reasoning models require.
+provider = ""
+base_url = ""
+model = ""
+api_key = ""
+api_key_env = ""
+timeout_seconds = 60
+max_tokens = 0
+# temperature = 0.2
+# [llm.headers]
+# HTTP-Referer = "https://github.com/"
+
+# --- OpenAI --------------------------------------------------------------
+# [llm]
+# provider = "openai"
+# model = "gpt-4o-mini"
+# api_key_env = "OPENAI_API_KEY"
+
+# --- Ollama (local, no key) ----------------------------------------------
+# [llm]
+# provider = "ollama"
+# model = "llama3.2"
+# base_url = "http://localhost:11434"
+
+# --- OpenAI-compatible gateway -------------------------------------------
+# [llm]
+# provider = "openai-compatible"
+# base_url = "http://localhost:1234/v1"   # LM Studio, vLLM, llama.cpp, …
+# model = "qwen2.5-coder"
+# api_key = "env:LOCAL_LLM_KEY"
+# temperature = 0.2
+#
+# [llm.headers]
+# HTTP-Referer = "https://github.com/"    # e.g. OpenRouter's attribution
+
+[report]
+# `:report [project] [period]` writes a status report for one project from its
+# git log and its tasks, using the [llm] connection above. `:report prompt`
+# prints the instructions actually in force — a good starting point for an
+# override. In the report view: j/k scroll, s writes the Markdown file,
+# r regenerates, esc closes.
+#
+# default_period      Window a bare `:report` covers. Accepts 7d, 30d, 2w, 3m,
+#                     week, month, quarter, year. Override per run:
+#                     `:report bada 30d`.
+# dir                 Where `s` writes reports. Default:
+#                     $XDG_DATA_HOME/bada/reports (~/.local/share/bada/reports).
+#                     One file per project per day: bada-2026-09-02.md.
+# system_prompt       Replaces the built-in instructions entirely.
+# system_prompt_file  The same, read from a file — easier to iterate on than a
+#                     long TOML string. Takes precedence over system_prompt.
+# extra_instructions  Appended to whichever prompt is in force. The way to nudge
+#                     language, tone, or focus without restating the whole thing.
+# max_commits/max_tasks  Cap how much history goes into the prompt (default 200
+#                     each), so a busy month cannot overflow the context window.
+# Listed blank, as above: an empty system_prompt means the built-in one is used,
+# and 0 means the built-in cap.
+dir = ""
+default_period = "7d"
+system_prompt = ""
+system_prompt_file = ""
+extra_instructions = ""
+max_commits = 0
+max_tasks = 0
+
+# --- Report in Korean, keeping the built-in structure ---------------------
+# [report]
+# extra_instructions = "한국어로 작성하세요."
+
+# --- A weekly report for a manager, written from scratch ------------------
+# [report]
+# default_period = "week"
+# system_prompt = """
+# You write a weekly status update for a non-technical manager.
+# Use only the facts in the digest. Three sections: Done, Doing, Blocked.
+# One line per item, no jargon, no commit hashes.
+# """
+
+# --- Keep a long prompt in its own file -----------------------------------
+# [report]
+# system_prompt_file = "~/.config/bada/report-prompt.md"
+
 [keys]
 quit = "q"
 add = "a"
