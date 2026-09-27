@@ -22,8 +22,9 @@ func TestRelativeDueCell(t *testing.T) {
 	if got := relativeDueCell(sql.NullTime{}); got != "-" {
 		t.Fatalf("empty due should be %q, got %q", "-", got)
 	}
-	// Noon today (UTC) keeps offsets clear of the midnight boundary.
-	base := normalizeDate(time.Now().UTC()).Add(12 * time.Hour)
+	// Noon today (local) keeps offsets clear of the midnight boundary;
+	// relativeDueCell counts days on local calendar boundaries.
+	base := normalizeDate(time.Now()).Add(12 * time.Hour)
 	cases := []struct {
 		offsetDays int
 		want       string
